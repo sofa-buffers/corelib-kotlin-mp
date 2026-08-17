@@ -1,0 +1,2 @@
+# Dev container secrets — mandatory per CORELIB_PLAN.md §11.2, never commit.
+.devcontainer/.env

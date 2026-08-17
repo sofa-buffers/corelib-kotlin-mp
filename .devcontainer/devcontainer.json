@@ -1,0 +1,15 @@
+{
+  "name": "Kotlin Multiplatform Dev",
+  "build": { "dockerfile": "Dockerfile" },
+  "runArgs": ["--env-file", "${localWorkspaceFolder}/.devcontainer/.env"],
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "fwcd.kotlin",
+        "mathiasfrohlich.kotlin",
+        "vscjava.vscode-gradle",
+        "anthropic.claude-code"
+      ]
+    }
+  }
+}
