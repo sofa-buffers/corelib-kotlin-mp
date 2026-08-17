@@ -1,0 +1,16 @@
+# Dev container secrets — mandatory per CORELIB_PLAN.md §11.2, never commit.
+.devcontainer/.env
+
+# Gradle
+.gradle/
+build/
+!gradle/wrapper/gradle-wrapper.jar
+local.properties
+
+# Kotlin
+.kotlin/
+
+# Editors
+.idea/
+*.iml
+.vscode/
