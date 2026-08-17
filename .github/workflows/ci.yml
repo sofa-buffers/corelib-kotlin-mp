@@ -1,0 +1,151 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    name: Build & test (JDK ${{ matrix.java }})
+    runs-on: ubuntu-latest
+    strategy:
+      # Every leg's result must be visible: one failing JDK does not cancel the rest.
+      fail-fast: false
+      matrix:
+        # The minimum supported release (the build targets JVM 17) plus the next
+        # LTS. Kotlin's own toolchain, not the JDK, is what varies the output, so
+        # two legs are enough to catch a toolchain-version regression.
+        java: ['17', '21']
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK ${{ matrix.java }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: ${{ matrix.java }}
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # The Kotlin/Native toolchain (LLVM + platform libraries) is a large
+      # download; caching it keeps the native legs from re-fetching it per run.
+      - name: Cache Kotlin/Native toolchain
+        uses: actions/cache@v4
+        with:
+          path: ~/.konan
+          key: konan-${{ runner.os }}-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties', 'build.gradle.kts') }}
+          restore-keys: konan-${{ runner.os }}-
+
+      # `build` compiles every target and runs `check`, which is the whole test
+      # suite on JVM, Node and Linux x64 native — the same commonTest sources, so
+      # a target-specific divergence in the wire bytes fails here.
+      - name: Build & test (all targets, debug and release)
+        run: ./gradlew build --stacktrace
+
+      # CORELIB_PLAN §7.3: coverage is wired into CI and held above 90%.
+      - name: Coverage report + threshold
+        run: ./gradlew koverXmlReport koverVerify
+
+      # Hand the report to the badge job instead of making it rebuild the whole
+      # project. Pinned to one leg so the badge value stays comparable across runs.
+      - name: Upload coverage report
+        if: matrix.java == '21'
+        uses: actions/upload-artifact@v4
+        with:
+          name: kover-report
+          path: build/reports/kover/report.xml
+          retention-days: 1
+
+  benchmarks:
+    name: Benchmark tools run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Install valgrind
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends valgrind
+
+      # A smoke run, not a measurement: the loop is shortened to a millisecond and
+      # only two workloads go through Callgrind, so what CI checks is that all
+      # three tools of CORELIB_PLAN §10 still run and still print BENCH_SPEC's
+      # grammar. The reportable numbers are produced by hand on a quiet machine.
+      - name: bench / perf (short loop)
+        run: |
+          ./gradlew bench perf -Psofab.bench.seconds=0.05
+      - name: run_callgrind.sh (two workloads)
+        run: |
+          WORKLOADS="encode_typical decode_typical" REPS_CHEAP="200 1200" \
+            bash bench/run_callgrind.sh
+
+  coverage-badge:
+    name: Coverage badge
+    runs-on: ubuntu-latest
+    needs: build-test
+    # Only refresh the badge for the canonical branch, never for PR forks.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download coverage report
+        uses: actions/download-artifact@v4
+        with:
+          name: kover-report
+          path: kover
+
+      # Emit shields.io endpoint JSON from Kover's JaCoCo-shaped XML. The README
+      # renders these through img.shields.io, so the styling comes from shields
+      # while the value stays dynamic.
+      - name: Render shields endpoints
+        run: |
+          mkdir -p .badges
+          python3 - <<'PY'
+          import json, xml.etree.ElementTree as ET
+          root = ET.parse('kover/report.xml').getroot()
+          def pct(kind):
+              for c in root.findall('counter'):
+                  if c.get('type') == kind:
+                      missed, covered = int(c.get('missed')), int(c.get('covered'))
+                      total = missed + covered
+                      return round(100.0 * covered / total, 1) if total else 0.0
+              return 0.0
+          def colour(v):
+              return 'brightgreen' if v >= 90 else 'yellow' if v >= 75 else 'red'
+          for kind, name in (('INSTRUCTION', 'coverage'), ('BRANCH', 'branches')):
+              v = pct(kind)
+              json.dump({'schemaVersion': 1, 'label': name, 'message': f'{v}%',
+                         'color': colour(v)}, open(f'.badges/{name}.json', 'w'))
+              print(name, v)
+          PY
+
+      - name: Publish badges to the badges branch
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./.badges
+          publish_branch: badges
+          keep_files: false
+          commit_message: 'Update coverage badges for ${{ github.sha }}'
+          user_name: 'github-actions[bot]'
+          user_email: 'github-actions[bot]@users.noreply.github.com'

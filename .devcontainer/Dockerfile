@@ -2,13 +2,18 @@ FROM ubuntu:24.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 
+# valgrind drives bench/run_callgrind.sh — the one benchmark tool of the three
+# that reports a machine-independent number (Ir/op). Without it the shipped
+# environment cannot run a tool the repository ships (CORELIB_PLAN §10).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
+    gnupg \
     git \
     unzip \
     zip \
     jq \
+    valgrind \
     build-essential \
     pkg-config \
     zlib1g-dev \
@@ -30,9 +35,13 @@ RUN mkdir -p -m 755 /etc/apt/keyrings \
         > /etc/apt/sources.list.d/adoptium.list \
     && apt-get update \
     && apt-get install -y --no-install-recommends temurin-21-jdk \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && ln -s "/usr/lib/jvm/temurin-21-jdk-$(dpkg --print-architecture)" /opt/java-current \
+    && /opt/java-current/bin/javac -version
 
-ENV JAVA_HOME=/usr/lib/jvm/temurin-21-jdk-amd64
+# Arch-independent: the Temurin package installs to a -amd64/-arm64 suffixed
+# directory, so the symlink above is what JAVA_HOME can safely point at.
+ENV JAVA_HOME=/opt/java-current
 ENV PATH="$JAVA_HOME/bin:$PATH"
 
 # Gradle.
@@ -40,7 +49,7 @@ ENV PATH="$JAVA_HOME/bin:$PATH"
 # Builds normally go through the project's Gradle wrapper; this pinned
 # distribution exists so `gradle wrapper` can be run in a fresh checkout and so
 # the container has a usable build tool before any wrapper is committed.
-ARG GRADLE_VERSION=8.14
+ARG GRADLE_VERSION=8.14.4
 RUN curl -fsSL -o /tmp/gradle.zip "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" \
     && unzip -q /tmp/gradle.zip -d /opt \
     && rm /tmp/gradle.zip \
@@ -68,6 +77,11 @@ RUN curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - \
 
 # Claude Code
 RUN npm install -g @anthropic-ai/claude-code
+
+# Fail the build here rather than at the first Gradle invocation if any tool
+# above did not land on PATH.
+RUN java -version && javac -version && gradle --version && gh --version \
+    && node --version && npm --version && valgrind --version
 
 WORKDIR /workspace
 
