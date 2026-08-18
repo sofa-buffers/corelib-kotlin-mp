@@ -1,22 +1,22 @@
 /*
- * SofaBuffers Kotlin Multiplatform — UTF-8 validation.
+ * SofaBuffers Kotlin Multiplatform — UTF-8 validation and materialization.
  *
  * SPDX-License-Identifier: MIT
  */
 package org.sofabuffers.sofab
 
 /**
- * UTF-8 validation of a raw byte range, for both sides of a `string` field
- * (CORELIB_PLAN §6.4).
+ * UTF-8 validation — and, on the decode side, materialization — of a raw byte
+ * range, for both sides of a `string` field (CORELIB_PLAN §6.4).
  *
  * [OStream.writeString] rejects an invalid [String] while measuring it, but
  * wherever a `string` is handled as *raw bytes* this validator is what enforces
  * the contract: on encode for the byte-container entry point
  * [OStream.writeFixlen] with [FixlenType.STRING], and on decode for bytes
  * arriving from a peer, which must be validated *before* they are handed to the
- * consumer as a [String]. Generated code needs it on every materialized string,
- * so it belongs here rather than being emitted into every generated message
- * class.
+ * consumer as a [String] — which is what [decode] does, in that order. Generated
+ * code needs it on every materialized string, so it belongs here rather than
+ * being emitted into every generated message class.
  *
  * Validation is on the byte range, not on a constructed [String]:
  * `ByteArray.decodeToString()` silently substitutes `U+FFFD` for malformed input,
@@ -81,4 +81,34 @@ public object Utf8 {
      * @return true when every byte of `b` is part of a well-formed sequence
      */
     public fun valid(b: ByteArray): Boolean = valid(b, 0, b.size)
+
+    /**
+     * Materialize `b[from, from + len)` as a [String], rejecting a range that is
+     * not well-formed UTF-8.
+     *
+     * This is what a decoder does with a `string` payload once it is complete,
+     * and it is two steps for a reason: [valid] first, the conversion second.
+     * [ByteArray.decodeToString] substitutes `U+FFFD` for malformed input, so a
+     * check made on the result can never fail — validating the bytes is what
+     * makes the rejection possible at all, and MESSAGE_SPEC §8 requires the
+     * rejection rather than a repaired string.
+     *
+     * A Kotlin [String] is a Unicode type with no room for the unvalidated
+     * bytes, so there is nothing here for a "lenient" mode to select: the ports
+     * whose string type is a byte container let a receiver turn strict validation
+     * off, and this one has no such switch to offer.
+     *
+     * @param b buffer
+     * @param from first byte of the payload
+     * @param len payload length in bytes
+     * @return the payload as a string
+     * @throws SofabException [SofabError.INVALID_MSG] when the range is not valid
+     *     UTF-8
+     */
+    public fun decode(b: ByteArray, from: Int, len: Int): String {
+        if (!valid(b, from, from + len)) {
+            throw SofabException(SofabError.INVALID_MSG, "string: invalid UTF-8")
+        }
+        return b.decodeToString(from, from + len)
+    }
 }
