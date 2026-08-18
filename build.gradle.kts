@@ -64,7 +64,7 @@ kotlin {
             // Test-only: parse the shared assets/test_vectors.json conformance
             // suite. Values stay exact — kotlinx-serialization keeps a JSON
             // number as its literal text, so a u64 above 2^53 survives.
-            implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
+            implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
         }
     }
 }
