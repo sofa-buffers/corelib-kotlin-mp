@@ -44,11 +44,13 @@ jobs:
       - name: Generate Dokka HTML
         run: ./gradlew dokkaGenerate
 
+      # Reads the repository's Pages configuration; it does not create it.
+      # CORELIB_PLAN §12.2 has the site enabled on the repository itself —
+      # Settings -> Pages -> Build and deployment -> Source: GitHub Actions — and
+      # the workflow's GITHUB_TOKEN is not permitted to create one, so asking it
+      # to (`enablement: true`) fails the job on a repo where Pages is off.
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
-        with:
-          # Auto-enable Pages (Actions source) so no manual repo setting is needed.
-          enablement: true
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
