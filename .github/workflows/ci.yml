@@ -70,6 +70,12 @@ jobs:
   benchmarks:
     name: Benchmark tools run
     runs-on: ubuntu-latest
+    # Not a dependency of the tools — they build from the same sources — but of
+    # the *cache*: three jobs resolving the Kotlin plugin at once earned a 429
+    # from Maven Central and failed this one. Starting after the build legs lets
+    # setup-gradle restore what they populated, so the common case fetches
+    # nothing at all.
+    needs: build-test
     steps:
       - uses: actions/checkout@v4
 
