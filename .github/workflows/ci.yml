@@ -41,7 +41,7 @@ jobs:
       # The Kotlin/Native toolchain (LLVM + platform libraries) is a large
       # download; caching it keeps the native legs from re-fetching it per run.
       - name: Cache Kotlin/Native toolchain
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.konan
           key: konan-${{ runner.os }}-${{ hashFiles('gradle/wrapper/gradle-wrapper.properties', 'build.gradle.kts') }}
