@@ -36,7 +36,7 @@ jobs:
           java-version: ${{ matrix.java }}
 
       - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v5
 
       # The Kotlin/Native toolchain (LLVM + platform libraries) is a large
       # download; caching it keeps the native legs from re-fetching it per run.
