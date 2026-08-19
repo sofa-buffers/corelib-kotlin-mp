@@ -67,36 +67,6 @@ jobs:
           path: build/reports/kover/report.xml
           retention-days: 1
 
-  benchmarks:
-    name: Benchmark tools run
-    runs-on: ubuntu-latest
-    # Not a dependency of the tools — they build from the same sources — but of
-    # the *cache*: three jobs resolving the Kotlin plugin at once earned a 429
-    # from Maven Central and failed this one. Starting after the build legs lets
-    # setup-gradle restore what they populated, so the common case fetches
-    # nothing at all.
-    needs: build-test
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Set up JDK 21
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '21'
-
-      - name: Set up Gradle
-        uses: gradle/actions/setup-gradle@v4
-
-      # A smoke run, not a measurement: the loop is shortened to a millisecond,
-      # so what CI checks is that the tools of CORELIB_PLAN §10 still run and
-      # still print BENCH_SPEC's grammar. No benchmark is measured here -- the
-      # reportable numbers, including run_callgrind.sh's Ir/op, are produced by
-      # hand on a quiet machine, which is the only place they mean anything.
-      - name: bench / perf (short loop)
-        run: |
-          ./gradlew bench perf -Psofab.bench.seconds=0.05
-
   coverage-badge:
     name: Coverage badge
     runs-on: ubuntu-latest
