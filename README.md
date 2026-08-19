@@ -243,7 +243,36 @@ buffer produce identical bytes. Generated code is also where the **schema** rule
 live that a corelib cannot know — sparse omission against declared defaults
 (MESSAGE_SPEC §2), `maxlen` / `count` / integer-width bounds reported as `INVALID`
 (§7.1), the §7.3 skip of a field whose wire type contradicts the schema, and UTF-8
-validation of a materialized string via `Utf8.valid`.
+validation of a materialized string via `Utf8.decode`.
+
+## Generated-code support layer
+
+Around every codec call, generated code does the same few things: put an element at
+the index its id names, grow an array as elements actually arrive, reassemble a
+payload that arrived in pieces, turn validated bytes into a `String`, drain the
+flush sink of a message too large to size up front. None of that is
+schema-specific — a `count`, a `maxlen` or a capacity is an argument, an element
+type an overload — so it lives here instead of being emitted, with its rationale,
+into every generated package.
+
+| symbol | what it is |
+|---|---|
+| `Seq.reserveRowBytes` … `reserveRowBooleans`, `Seq.reserveRowList` | place a matrix row at the index its element id names, filling a gap with the empty row rather than shifting every later row down (MESSAGE_SPEC §5.1 / §7.4) |
+| `Seq.ensureCap` (one overload per array type) | the array-growth policy: double, stop at the announced count, and never allocate from a count the wire claimed but has not delivered |
+| `Seq.ARRAY_INIT_CAP`, `Seq.EMPTY_BYTES` … `EMPTY_BOOLEANS` | the bounded first reservation, and the shared zero-length arrays a field initializer points at |
+| `Seq.boolsToBytes` | the one materialization the encode side still needs: `bool` travels as an unsigned `0`/`1`, the one element kind with no `writeArray*` overload of its own |
+| `PayloadAcc` | a growable byte sink for the two places the size is not known in advance — reassembling a `string` / `blob` payload split across feeds, and draining an `OStream`'s `FlushSink` as a `FlushSink` itself. A payload that arrives whole never touches its buffer, and the value never depends on where the split fell |
+| `Utf8.decode` | validate a byte range and materialize it, in that order — the only order in which invalid UTF-8 can still be rejected (§6.4) |
+
+There are eleven of most of these because Kotlin's unsigned arrays are `value`
+classes over their signed peers rather than subtypes of a common array interface:
+one growth rule, eleven element widths. Two things stay with generated code, both
+of them CORELIB_PLAN §5.1 calls: the **size** of the encode scratch buffer, and its
+allocation.
+
+These are ordinary public API, usable directly; they are simply shaped by what
+generated code needs. Older generated sources carry their own copies of some of
+them and keep working unchanged.
 
 ## Memory handling
 
