@@ -18,6 +18,12 @@ jobs:
   build-test:
     name: Build & test (JDK ${{ matrix.java }})
     runs-on: ubuntu-latest
+    # Bound the job so a wedged step fails loudly and points at itself instead of
+    # sitting on a runner for GitHub's six-hour default. The account has 20
+    # concurrent Actions slots; every stuck job is one of them held away from
+    # everyone else. A leg runs 45 s warm and 2.6 min on a cold ~/.konan cache,
+    # so 20 min is roughly 4x the slow case and never trips on a healthy run.
+    timeout-minutes: 20
     strategy:
       # Every leg's result must be visible: one failing JDK does not cancel the rest.
       fail-fast: false
@@ -70,6 +76,8 @@ jobs:
   coverage-badge:
     name: Coverage badge
     runs-on: ubuntu-latest
+    # Downloads one XML artifact and renders two JSON files: 7-9 s observed.
+    timeout-minutes: 10
     needs: build-test
     # Only refresh the badge for the canonical branch, never for PR forks.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'

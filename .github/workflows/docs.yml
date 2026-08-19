@@ -21,6 +21,11 @@ jobs:
   build:
     name: Build API documentation
     runs-on: ubuntu-latest
+    # Same reasoning as CI: an unbounded job can hold one of the account's 20
+    # concurrent slots for six hours, and a hung step should name itself rather
+    # than time out anonymously. Dokka takes 1.0-1.7 min here, so 10 min leaves
+    # ample headroom over the slow case.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
 
@@ -61,6 +66,8 @@ jobs:
     name: Deploy to GitHub Pages
     needs: build
     runs-on: ubuntu-latest
+    # Pages deployment only: 10-47 s observed.
+    timeout-minutes: 10
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
