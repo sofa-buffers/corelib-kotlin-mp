@@ -49,7 +49,7 @@ ENV PATH="$JAVA_HOME/bin:$PATH"
 # Builds normally go through the project's Gradle wrapper; this pinned
 # distribution exists so `gradle wrapper` can be run in a fresh checkout and so
 # the container has a usable build tool before any wrapper is committed.
-ARG GRADLE_VERSION=8.14.5
+ARG GRADLE_VERSION=9.7.0
 RUN curl -fsSL -o /tmp/gradle.zip "https://services.gradle.org/distributions/gradle-${GRADLE_VERSION}-bin.zip" \
     && unzip -q /tmp/gradle.zip -d /opt \
     && rm /tmp/gradle.zip \
