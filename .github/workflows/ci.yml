@@ -88,20 +88,14 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Install valgrind
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends valgrind
-
-      # A smoke run, not a measurement: the loop is shortened to a millisecond and
-      # only two workloads go through Callgrind, so what CI checks is that all
-      # three tools of CORELIB_PLAN §10 still run and still print BENCH_SPEC's
-      # grammar. The reportable numbers are produced by hand on a quiet machine.
+      # A smoke run, not a measurement: the loop is shortened to a millisecond,
+      # so what CI checks is that the tools of CORELIB_PLAN §10 still run and
+      # still print BENCH_SPEC's grammar. No benchmark is measured here -- the
+      # reportable numbers, including run_callgrind.sh's Ir/op, are produced by
+      # hand on a quiet machine, which is the only place they mean anything.
       - name: bench / perf (short loop)
         run: |
           ./gradlew bench perf -Psofab.bench.seconds=0.05
-      - name: run_callgrind.sh (two workloads)
-        run: |
-          WORKLOADS="encode_typical decode_typical" REPS_CHEAP="200 1200" \
-            bash bench/run_callgrind.sh
 
   coverage-badge:
     name: Coverage badge
