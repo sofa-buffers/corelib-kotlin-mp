@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: MIT
  */
 import org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi
+import org.gradle.api.tasks.PathSensitivity
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
@@ -35,6 +36,12 @@ kotlin {
             // the one CORELIB_PLAN §8 requires the repo to carry, never a duplicate
             // under a resources directory that could drift from it.
             systemProperty("sofab.vectors", layout.projectDirectory.file("assets/test_vectors.json").asFile.path)
+            // ReadmeShapeTest reads README.md, which Gradle cannot infer from the
+            // sources: without this the task stays UP-TO-DATE across a README edit
+            // and the §9 guard never runs on the change that needed it.
+            inputs.file(layout.projectDirectory.file("README.md"))
+                .withPropertyName("readme")
+                .withPathSensitivity(PathSensitivity.RELATIVE)
         }
     }
 
