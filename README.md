@@ -245,7 +245,7 @@ live that a corelib cannot know — sparse omission against declared defaults
 (§7.1), the §7.3 skip of a field whose wire type contradicts the schema, and UTF-8
 validation of a materialized string via `Utf8.decode`.
 
-## Generated-code support layer
+### Generated-code support layer
 
 Around every codec call, generated code does the same few things: put an element at
 the index its id names, grow an array as elements actually arrive, reassemble a
