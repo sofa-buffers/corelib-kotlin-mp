@@ -85,6 +85,14 @@ val benchRuntime: FileCollection = files(
 // bench/run_callgrind.sh drives the same workloads through a bare `java` command
 // (Callgrind must see one JVM per rep count, with nothing of Gradle's in it), so
 // it needs the runtime classpath — the JVM jar plus kotlin-stdlib — as a string.
+// The JVM test suite reads README.md (ReadmeGeneratedObjectsTest checks that the
+// documented calls are the ones the example implements). Gradle does not know
+// that, so a README-only edit would leave jvmTest UP-TO-DATE and the check would
+// silently not run. Declaring the file an input is what makes it a real gate.
+tasks.named<Test>("jvmTest") {
+    inputs.file(rootProject.file("README.md")).withPathSensitivity(PathSensitivity.RELATIVE)
+}
+
 tasks.register("benchClasspath") {
     group = "verification"
     description = "Write the benchmark runtime classpath for bench/run_callgrind.sh."
