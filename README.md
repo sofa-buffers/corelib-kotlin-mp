@@ -380,37 +380,17 @@ for the `perf` message, **1,000,005** for the blob, **956** for the composite.
   across machines and against the sibling ports. It runs each workload at two rep
   counts and subtracts, which cancels JVM startup, class loading and JIT cost.
 
-### Measured here
-
-Taken with `bench/run_callgrind.sh` on Temurin 21.0.12, alongside `corelib-java`
-driven through **its** Callgrind tool on the same host, JVM and rep deltas:
-
-| Workload | Kotlin Ir/op | `corelib-java` Ir/op |
-|---|---|---|
-| encode: u64 array (1000) | 60,764 | 60,284 |
-| encode: typical message | 926 | 897 |
-| encode: blob 1MB one-shot | 1,013,550 | — |
-| encode: blob 1MB streaming | 95,209 | — |
-| encode: composite | 52,454 | 52,907 |
-| decode: u64 array (1000) | 64,867 | 64,508 |
-| decode: typical message | 1,181 | 1,167 |
-| decode: blob 1MB | 82,739 | — |
-| decode: composite | 10,160 | 9,650 |
-| decode: composite skip-all | 9,717 | — |
-
-Within about 1 % of the hand-tuned Java reference on five of the six shared rows,
-and ahead of it on the composite encode.
-
 **Read the two `blob 1MB` encode rows against each other, not against the rest.**
-Five of that message's bytes are metadata and a million are payload, so their MB/s
-is this machine's memory bandwidth rather than a statement about the library, and
-their `Ir/op` gap is the JVM's array-copy strategy: the one-shot payload lands at
-offset 5, and for an unaligned destination the JIT's copy stub takes a path
-Callgrind counts at roughly one instruction per byte. The
-`decode: composite skip-all` row shares a JVM with `decode: composite`, so the
-visitor call sites inside `IStream` see both sinks and neither row runs
+Five of that message's bytes are metadata and a million are payload, so their
+MB/s is this machine's memory bandwidth rather than a statement about the
+library. `decode: composite skip-all` shares a JVM with `decode: composite`, so
+the visitor call sites inside `IStream` see both sinks and neither row runs
 monomorphic; what not-decoding is worth shows up in `Ir/op`, where each workload
 gets its own JVM.
+
+Measured figures are not reproduced here — they belong to the cross-language
+benchmark arena, which runs every port on one host under one methodology. This
+section says how to obtain them, not what they came out as.
 
 The exact workloads, timing rules and output grammar are specified in the
 [SofaBuffers documentation](https://github.com/sofa-buffers/documentation).
