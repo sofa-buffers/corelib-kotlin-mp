@@ -76,6 +76,25 @@ class StreamingTest {
         os.writeUnsigned(1, 1)
         assertEquals(2, os.bytesUsed)
         assertContentEquals(byteArrayOf(0x08, 0x01), tight)
+
+        // MIN_OUTPUT_BUFFER is 1, so §7.2 item 4's "undersized buffer" is the
+        // zero-length one, and its sink-less converse must be *accepted*: an
+        // all-default message is the empty byte string (MESSAGE_SPEC §2), so a
+        // generated encode() sizing from MAX_SIZE == 0 hands over exactly this.
+        val empty = ByteArray(0)
+        val none = OStream(empty)
+        assertEquals(0, none.bytesUsed)
+        // Nothing written: the zero-byte message encodes into the zero-byte buffer.
+        assertEquals(0, none.flush())
+        // The first byte that does not fit is BUFFER_FULL, not a handover failure.
+        val full = assertFailsWith<SofabException> { none.writeUnsigned(1, 1) }
+        assertEquals(SofabError.BUFFER_FULL, full.error)
+        // The same holds for a mid-stream buffer-set, and for offset == size, which
+        // is the other way to leave zero usable bytes.
+        val reset = OStream(ByteArray(4))
+        reset.bufferSet(empty, 0)
+        assertEquals(0, reset.bytesUsed)
+        assertEquals(SofabError.BUFFER_FULL, assertFailsWith<SofabException> { reset.writeUnsigned(1, 1) }.error)
     }
 
     @Test

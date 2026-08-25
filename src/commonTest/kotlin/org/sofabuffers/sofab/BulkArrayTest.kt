@@ -87,15 +87,39 @@ class BulkArrayTest {
     }
 
     @Test
-    fun aRefusedOfferFallsBackToPerElementDelivery() {
+    fun aDeclinedOfferFallsBackToPerElementDelivery() {
         val src = longArrayOf(5, 6, 7)
         val wire = encode(256) { it.writeArrayUnsigned(1, src) }
-        for (dst in listOf(null, LongArray(2), FloatArray(3), "not an array")) {
+        // null is the default decline; anything that is not one of the four
+        // primitive integer arrays is not a destination at all.
+        for (dst in listOf(null, FloatArray(3), "not an array")) {
             val v = Bulk(dst)
             IStream().feed(wire, v)
             assertEquals(listOf(5L, 6L, 7L), v.perElement, "destination $dst")
-            assertEquals(-1, v.ended, "a refused offer never reports a bulk end")
+            assertEquals(-1, v.ended, "a declined offer never reports a bulk end")
         }
+    }
+
+    @Test
+    fun aDestinationTooShortForTheAnnouncedCountIsInvalidArgument() {
+        // §6.6.3's third refusal tier, §6.3's `InvalidArgument`: the bytes are
+        // well-formed and break no bound they declare — the caller's storage is
+        // what does not fit. Not INVALID_MSG (the message is fine, and a larger
+        // destination decodes it), not LIMIT_EXCEEDED (no limit was configured to
+        // raise), and never a silent fall-back to per-element delivery, which would
+        // leave a miscounted consumer none the wiser.
+        val wire = encode(256) { it.writeArrayUnsigned(1, longArrayOf(5, 6, 7)) }
+        for (dst in listOf(LongArray(2), IntArray(2), ShortArray(2), ByteArray(2))) {
+            val v = Bulk(dst)
+            val e = assertFailsWith<SofabException> { IStream().feed(wire, v) }
+            assertEquals(SofabError.ARGUMENT, e.error, "destination $dst")
+            assertEquals(emptyList(), v.perElement, "no silent downgrade")
+            assertEquals(-1, v.ended)
+        }
+        // The boundary: exactly `count` is enough, and one more is fine too.
+        val exact = Bulk(LongArray(3))
+        IStream().feed(wire, exact)
+        assertEquals(3, exact.ended)
     }
 
     @Test

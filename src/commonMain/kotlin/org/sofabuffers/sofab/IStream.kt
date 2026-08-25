@@ -143,11 +143,15 @@ public class IStream {
     private var fixlenRemaining = 0
 
     /**
-     * Carry buffer for a float payload split across feeds. Allocated on first use:
-     * a decode whose fp32/fp64 values never straddle a chunk boundary — the
-     * whole-message case — never allocates it at all.
+     * Landing zone for a float payload split across feeds — eight bytes, the
+     * widest fixlen scalar the format carries.
+     *
+     * **Sized at construction** (CORELIB_PLAN §6.6.2): its size comes from this
+     * document, never from the wire, so it is bounded working state and belongs in
+     * the constructor. Allocating it on the first straddling float would put an
+     * allocation on a `feed` path, which §6.6 forbids.
      */
-    private var acc: ByteArray? = null
+    private val acc = ByteArray(8)
     private var accLen = 0
 
     /**
@@ -179,6 +183,23 @@ public class IStream {
     private var invalid = false
 
     /**
+     * Latched receiver-limit stop: the [Visitor] rejected a schema-**unbounded**
+     * count or length against a configured cap (CORELIB_PLAN §6.2.1). §6.3 calls
+     * that "a **terminal**, receiver-local **policy** rejection" — the decode stops
+     * where it stopped and this decoder will not finish the message — so it latches
+     * like [invalid] does, and for the same reason: the parse position it held is
+     * meaningless afterwards.
+     *
+     * It is a **separate** latch and never sets [invalid]: §6.2.1 forbids folding a
+     * policy rejection into the `INVALID` outcome, because the same bytes decode
+     * under a looser limit. The category reaches the caller on the error channel,
+     * as [SofabError.LIMIT_EXCEEDED], which is one of the two surfaces §6.3 leaves
+     * open; what [status] must not do is answer [DecodeStatus.COMPLETE] for a
+     * message this decoder abandoned.
+     */
+    private var limitStopped = false
+
+    /**
      * Position just past the word most recently read by [readWord], or `-1` when
      * that word ran past the end of the supplied bytes.
      */
@@ -205,10 +226,12 @@ public class IStream {
      * [SofabError.INVALID_MSG] it is exactly how a stream decoder resynchronises
      * onto the next message, and the *only* way: that outcome is terminal
      * (CORELIB_PLAN §5.2), so until this call [status] keeps answering
-     * [DecodeStatus.INVALID] and [feed] keeps refusing bytes.
+     * [DecodeStatus.INVALID] and [feed] keeps refusing bytes. A
+     * [SofabError.LIMIT_EXCEEDED] stop (§6.2.1, §6.3) clears here too, and it is
+     * likewise the only way to clear it.
      *
-     * [acc] keeps its allocation: retaining it is the point of reuse, and only its
-     * first [accLen] bytes are ever read, which is zeroed here.
+     * [acc] is construction-sized state and is not reallocated: only its first
+     * [accLen] bytes are ever read, and that counter is zeroed here.
      */
     public fun reset() {
         varintValue = 0
@@ -232,6 +255,7 @@ public class IStream {
         bulkAt = 0
         depth = 0
         invalid = false
+        limitStopped = false
         machineBytes = 0
         // Pure scratch — every path writes it before it reads it — but cleared
         // anyway so "reset restores every declared field" needs no exception.
@@ -263,6 +287,17 @@ public class IStream {
             if (invalid) {
                 return DecodeStatus.INVALID
             }
+            // A receiver-limit stop is terminal too, but the bytes are well-formed:
+            // reporting INVALID would fold a policy rejection into the wire verdict,
+            // which §6.2.1 forbids. INCOMPLETE is what actually happened — the
+            // decoder stopped part-way through a message and will not finish it —
+            // and the LIMIT_EXCEEDED category is on the error channel (§6.3). The
+            // test guards a rejection thrown from a callback at a *field boundary*,
+            // where state and depth are untouched and COMPLETE would otherwise be
+            // reported for a message whose payload was never consumed.
+            if (limitStopped) {
+                return DecodeStatus.INCOMPLETE
+            }
             // COMPLETE only at a true field boundary: no partial field header varint
             // (that is its own state, S_HEADER), no in-progress value/payload/array
             // element (S_IDLE covers the resumable machine and mid-array between
@@ -293,19 +328,24 @@ public class IStream {
      * out of bytes mid-field is *not* that: it suspends and resumes on the next
      * call.
      *
+     * A [SofabError.LIMIT_EXCEEDED] rejection — a receiver cap the [Visitor]
+     * applied to a schema-unbounded count or length (§6.2.1) — is terminal in the
+     * same way (§6.3) and latches separately: further feeds are refused with that
+     * same code, and [status] reports [DecodeStatus.INCOMPLETE] rather than
+     * [DecodeStatus.COMPLETE] for a message this decoder abandoned. It is never
+     * folded into [DecodeStatus.INVALID], because the bytes are well-formed.
+     *
      * @param data backing array
      * @param off start offset
      * @param len number of bytes to consume
      * @param visitor sink for decoded fields
      * @throws SofabException [SofabError.INVALID_MSG] on malformed input, or on any
-     *   call after malformed input was already rejected
+     *   call after malformed input was already rejected; [SofabError.LIMIT_EXCEEDED]
+     *   on any call after a receiver limit stopped the decode
      */
     public fun feed(data: ByteArray, off: Int, len: Int, visitor: Visitor) {
-        if (invalid) {
-            throw SofabException(
-                SofabError.INVALID_MSG,
-                "decode already INVALID; reset() to start a new message",
-            )
+        if (invalid || limitStopped) {
+            throwLatched()
         }
         try {
             decode(data, off, len, visitor)
@@ -314,14 +354,36 @@ public class IStream {
             // a rejection raised anywhere in this class — fast path, resumable state
             // machine, or a schema-bound rejection thrown by generated code from
             // inside a Visitor callback — is terminal, and this is the one place all
-            // of them pass through. LIMIT_EXCEEDED, a receiver-side policy rejection
-            // of well-formed bytes (§6.2.1), deliberately does not latch.
-            if (e.error == SofabError.INVALID_MSG) {
-                invalid = true
+            // of them pass through. LIMIT_EXCEEDED is terminal too (§6.3) but is a
+            // policy rejection of well-formed bytes, so it latches *separately*:
+            // §6.2.1 forbids folding it into the INVALID outcome.
+            when (e.error) {
+                SofabError.INVALID_MSG -> invalid = true
+                SofabError.LIMIT_EXCEEDED -> limitStopped = true
+                else -> Unit
             }
             throw e
         }
     }
+
+    /**
+     * Rethrow the latched terminal verdict. Out of line, and out of [feed]'s body,
+     * for the same reason [decode] is: [feed] is the hottest entry point in the
+     * class, and message construction inline in it is bytecode the JIT has to carry
+     * through every inlining decision it makes about the caller.
+     */
+    private fun throwLatched(): Nothing =
+        if (invalid) {
+            throw SofabException(
+                SofabError.INVALID_MSG,
+                "decode already INVALID; reset() to start a new message",
+            )
+        } else {
+            throw SofabException(
+                SofabError.LIMIT_EXCEEDED,
+                "decode already stopped by a receiver limit; reset() to start a new message",
+            )
+        }
 
     /**
      * Decode [len] bytes of [data] from [off]. The body of [feed], split out so the
@@ -1007,10 +1069,18 @@ public class IStream {
 
     /**
      * Put the bulk offer to the visitor for an integer array of [c] elements and arm
-     * the fill if it is taken. A destination shorter than the announced count is
-     * refused rather than partially filled: `count` is the wire's claim, and a
-     * consumer that sized against a different number must not be able to turn that
-     * into an out-of-bounds write.
+     * the fill if it is taken.
+     *
+     * A destination the caller handed over that is **shorter than the announced
+     * count** is refused with [SofabError.ARGUMENT] — CORELIB_PLAN §6.6.3's third
+     * refusal tier, the one §6.3 names `InvalidArgument`: the message is
+     * well-formed and inside every bound it declares, so `INVALID_MSG` would call
+     * good bytes malformed and `LIMIT_EXCEEDED` would promise a limit to raise that
+     * nobody configured. What is wrong is the storage this caller offered, and
+     * neither partially filling it nor growing it is an option. Declining the offer
+     * outright — returning `null`, or anything that is not one of the four
+     * primitive integer arrays — is not a destination at all and still falls back
+     * to per-element delivery.
      */
     private fun armBulk(visitor: Visitor, c: Int) {
         bulkB = null
@@ -1022,28 +1092,44 @@ public class IStream {
         if (c == 0) {
             return
         }
-        // One virtual call and one type resolution per ARRAY. Anything that is not a
-        // primitive integer array long enough for the announced count is refused and
-        // the elements go the ordinary way, so neither a miscounted nor a mistyped
-        // destination can overrun.
+        // One virtual call and one type resolution per ARRAY. A mistyped destination
+        // is no offer and the elements go the ordinary way; a rightly typed one that
+        // is too short is the caller's mistake and is reported, never overrun.
         when (val dst = visitor.arrayBulk(id, arrayKind, c)) {
-            is LongArray -> if (dst.size >= c) {
+            is LongArray -> {
+                requireRoom(dst.size, c)
                 bulkL = dst
                 bulkW = W_LONG64
             }
-            is IntArray -> if (dst.size >= c) {
+            is IntArray -> {
+                requireRoom(dst.size, c)
                 bulkI = dst
                 bulkW = W_INT32
             }
-            is ShortArray -> if (dst.size >= c) {
+            is ShortArray -> {
+                requireRoom(dst.size, c)
                 bulkS = dst
                 bulkW = W_SHORT16
             }
-            is ByteArray -> if (dst.size >= c) {
+            is ByteArray -> {
+                requireRoom(dst.size, c)
                 bulkB = dst
                 bulkW = W_BYTE8
             }
             else -> {}
+        }
+    }
+
+    /**
+     * The §6.6.3 destination check: a bulk destination must hold the announced
+     * count. Split out so the four arms share one throw site and stay inlinable.
+     */
+    private fun requireRoom(size: Int, c: Int) {
+        if (size < c) {
+            throw SofabException(
+                SofabError.ARGUMENT,
+                "bulk destination holds $size elements, the array announced $c",
+            )
         }
     }
 
@@ -1362,11 +1448,7 @@ public class IStream {
      * left over to reject.
      */
     private fun stepFixlenVal(b: Int, visitor: Visitor) {
-        var a = acc
-        if (a == null) {
-            a = ByteArray(8) // first straddling float on this stream
-            acc = a
-        }
+        val a = acc
         a[accLen++] = b.toByte()
         fixlenRemaining--
         if (fixlenRemaining != 0) {

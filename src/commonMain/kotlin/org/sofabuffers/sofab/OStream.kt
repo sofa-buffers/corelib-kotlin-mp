@@ -49,7 +49,7 @@ package org.sofabuffers.sofab
  * whose presence carries the array's length (§5.1); that position closes with
  * [writeSequenceEndKeep], which forces the frame out. Held-back ids are encoder
  * state, not buffer content, so this never interacts with flushing, and the run
- * grows to the full [Sofab.MAX_DEPTH] so the output is canonical at every legal
+ * reaches the full [Sofab.MAX_DEPTH] so the output is canonical at every legal
  * depth.
  *
  * This class is not thread-safe; encode one message from one thread.
@@ -63,12 +63,11 @@ package org.sofabuffers.sofab
  * val used = os.bytesUsed
  * ```
  *
- * @param buffer caller-owned output buffer (non-empty)
+ * @param buffer caller-owned output buffer
  * @param offset initial write position (`0..buffer.size`)
  * @param sink flush sink, or `null` for none
- * @throws IllegalArgumentException if the buffer is empty, the offset is out of
- *   range, or a sink is given and the buffer leaves less than
- *   [Sofab.MIN_OUTPUT_BUFFER] usable bytes
+ * @throws IllegalArgumentException if the offset is out of range, or a sink is
+ *   given and the buffer leaves less than [Sofab.MIN_OUTPUT_BUFFER] usable bytes
  */
 public class OStream(
     buffer: ByteArray,
@@ -106,16 +105,19 @@ public class OStream(
      * the whole run at once, and there is no other way to leave it; the invariant
      * therefore holds by construction.
      *
-     * Allocated on the first nested [writeSequenceBeginLazy] — an encoder whose
-     * sequences never nest never allocates it — and grown on demand, so the
-     * hold-back reaches the full [Sofab.MAX_DEPTH].
+     * **Sized at construction to its full extent** (CORELIB_PLAN §6.0.1, §6.6.2):
+     * the hold-back reaches the full [Sofab.MAX_DEPTH], so this encoder is
+     * canonical at every legal nesting depth, and no `write` path ever allocates.
+     * [pending0] carries entry one, so this array carries entries two and beyond
+     * and needs `MAX_DEPTH - 1` slots.
      */
-    private var pending: IntArray? = null
+    private val pending = IntArray(Sofab.MAX_DEPTH - 1)
 
     /**
      * The outermost held-back id, kept out of [pending] so that a stream whose
-     * sequences never nest — much the commonest shape — holds one back without
-     * allocating an array at all. [pending] carries entries two and beyond.
+     * sequences never nest — much the commonest shape — holds one back with a
+     * scalar store and no array indexing at all. [pending] carries entries two and
+     * beyond.
      */
     private var pending0 = 0
 
@@ -171,10 +173,10 @@ public class OStream(
      * which is why a sink cannot hand back storage the encoder could not write a
      * single byte into. On a sink-less stream no minimum applies.
      *
-     * @param buffer new caller-owned output buffer (non-empty)
+     * @param buffer new caller-owned output buffer
      * @param offset initial write position (`0..buffer.size`)
-     * @throws IllegalArgumentException if the buffer is empty, the offset is out of
-     *   range, or this stream carries a sink and the buffer leaves less than
+     * @throws IllegalArgumentException if the offset is out of range, or this
+     *   stream carries a sink and the buffer leaves less than
      *   [Sofab.MIN_OUTPUT_BUFFER] usable bytes
      */
     public fun bufferSet(buffer: ByteArray, offset: Int) {
@@ -203,10 +205,10 @@ public class OStream(
      * thread would corrupt its nesting validation or prepend a stale
      * `sequence start` to it.
      *
-     * The [pending] array keeps its allocation: retaining it is the point of
-     * reuse, and it is never read while [nPending] is zero, which is cleared here.
+     * The [pending] array is construction-sized state and is not reallocated: it
+     * is never read while [nPending] is zero, which is cleared here.
      *
-     * @param buffer caller-owned output buffer (non-empty)
+     * @param buffer caller-owned output buffer
      */
     public fun reset(buffer: ByteArray) {
         bufferSet(buffer, 0)
@@ -405,7 +407,7 @@ public class OStream(
         writeVarint((pending0.toLong() shl 3) or T_SEQUENCE_START.toLong())
         val p = pending
         for (i in 0 until n - 1) {
-            writeVarint((p!![i].toLong() shl 3) or T_SEQUENCE_START.toLong())
+            writeVarint((p[i].toLong() shl 3) or T_SEQUENCE_START.toLong())
         }
     }
 
@@ -1043,10 +1045,10 @@ public class OStream(
      * split a pending run: an output buffer far smaller than the message produces
      * exactly the one-shot bytes.
      *
-     * The hold-back reaches the full [Sofab.MAX_DEPTH]: the pending run grows on
-     * demand, so this encoder is canonical at every legal nesting depth. Bounding
-     * the run and framing eagerly beyond the bound is an allowance for heap-free
-     * profiles only (CORELIB_PLAN §6), and no Kotlin target is one.
+     * The hold-back reaches the full [Sofab.MAX_DEPTH], so this encoder is
+     * canonical at every legal nesting depth. The run is sized at construction
+     * (CORELIB_PLAN §6.0.1): bounding it smaller and framing eagerly beyond the
+     * bound is a constrained-profile allowance this port does not take.
      *
      * This is the only way to open a sequence. How it closes decides whether a
      * contentless one survives: [writeSequenceEnd] drops it, [writeSequenceEndKeep]
@@ -1067,23 +1069,15 @@ public class OStream(
             throw SofabException(SofabError.ARGUMENT, "id $id")
         }
         if (nPending == 0) {
-            // Depth-one hold-back: a scalar, so an encoder whose sequences never
-            // nest never allocates the overflow array at all.
+            // Depth-one hold-back: a scalar, so the commonest shape costs one store
+            // and no array indexing.
             pending0 = id
             nPending = 1
         } else {
-            val slot = nPending - 1 // pending[] carries entries two and beyond
-            var p = pending
-            if (p == null) {
-                p = IntArray(PENDING_INITIAL)
-                pending = p
-            } else if (slot == p.size) {
-                // Grow rather than fall back to eager framing. nPending <= depth <
-                // MAX_DEPTH, so the run can never need more than MAX_DEPTH slots.
-                p = p.copyOf(if (p.size * 2 < Sofab.MAX_DEPTH) p.size * 2 else Sofab.MAX_DEPTH)
-                pending = p
-            }
-            p[slot] = id
+            // pending[] carries entries two and beyond, and the MAX_DEPTH test above
+            // has already bounded nPending <= depth < MAX_DEPTH, so the slot is
+            // always inside the construction-sized array.
+            pending[nPending - 1] = id
             nPending++
         }
         depth++
@@ -1155,13 +1149,6 @@ public class OStream(
     private companion object {
 
         /**
-         * Initial capacity of the held-back-header run. It is a starting size, not a
-         * limit: the run grows on demand and can reach [Sofab.MAX_DEPTH], which is
-         * what makes this encoder canonical at every legal nesting depth.
-         */
-        const val PENDING_INITIAL = 8
-
-        /**
          * Bytes of room that let [putVarint] assemble a varint in a single
          * eight-byte store: ten covers the longest varint, and the store itself
          * always touches eight bytes from the write position.
@@ -1199,12 +1186,14 @@ public class OStream(
          * there rather than partway through a message (CORELIB_PLAN §5.1).
          *
          * [Sofab.MIN_OUTPUT_BUFFER] applies only when a `sink` is present. Without
-         * one no flush can occur, so §5.1 imposes no minimum: the buffer either holds
-         * the message or reports [SofabError.BUFFER_FULL], and a caller sizing from a
-         * generated `MAX_SIZE` keeps an exact fit.
+         * one no flush can occur, so §5.1.4 imposes **no minimum at all** — not even
+         * one byte: the buffer either holds the message or reports
+         * [SofabError.BUFFER_FULL], and a caller sizing from a generated `MAX_SIZE`
+         * keeps an exact fit. An all-default message has `MAX_SIZE == 0`
+         * (MESSAGE_SPEC §2), so the zero-length buffer is a case this path must
+         * accept rather than reject.
          */
         fun checkHandover(buffer: ByteArray, offset: Int, sink: FlushSink?) {
-            require(buffer.isNotEmpty()) { "buffer must be non-empty" }
             require(offset in 0..buffer.size) { "offset out of range" }
             require(sink == null || buffer.size - offset >= Sofab.MIN_OUTPUT_BUFFER) {
                 "streaming buffer leaves ${buffer.size - offset} usable bytes, " +
