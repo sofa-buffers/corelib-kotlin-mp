@@ -216,14 +216,19 @@ class DecoderTest {
     }
 
     @Test
-    fun aReceiverLimitRejectionDoesNotLatch() {
+    fun aReceiverLimitRejectionIsTerminalButNeverInvalid() {
         // §6.2.1: LIMIT_EXCEEDED is policy about well-formed bytes, a category
         // distinct from INVALID — so it must not be folded into the decode outcome.
+        // §6.3 also calls it "a terminal, receiver-local policy rejection", so the
+        // decoder must stop: the rejection here is thrown from a callback at a
+        // top-level field boundary, where nothing else would have moved `state` or
+        // `depth` and `status` would have answered COMPLETE for a message whose
+        // payload was never consumed.
         val capped = object : Visitor {
-            var trip = true
+            var trips = 0
             override fun fixlenBegin(id: Int, subtype: FixlenType, total: Int) {
-                if (trip && total > 2) {
-                    trip = false
+                if (total > 2) {
+                    trips++
                     throw SofabException(SofabError.LIMIT_EXCEEDED, "max_dyn_string_len")
                 }
             }
@@ -232,6 +237,20 @@ class DecoderTest {
         val e = assertFailsWith<SofabException> { input.feed(unhex("021a414243"), capped) }
         assertEquals(SofabError.LIMIT_EXCEEDED, e.error)
         assertTrue(input.status != DecodeStatus.INVALID, "a policy rejection is not a wire verdict")
+        assertEquals(DecodeStatus.INCOMPLETE, input.status, "the message was abandoned, not completed")
+
+        // Terminal: every later feed is refused with the same category, without the
+        // visitor being called again, and the verdict does not drift to INVALID.
+        val again = assertFailsWith<SofabException> { input.feed(unhex("021a414243"), capped) }
+        assertEquals(SofabError.LIMIT_EXCEEDED, again.error)
+        assertEquals(1, capped.trips, "a latched stream decodes nothing further")
+        assertEquals(DecodeStatus.INCOMPLETE, input.status)
+
+        // reset() is the only way out, exactly as for INVALID.
+        input.reset()
+        assertEquals(DecodeStatus.COMPLETE, input.status)
+        input.feed(unhex("0808"), object : Visitor {})
+        assertEquals(DecodeStatus.COMPLETE, input.status)
     }
 
     // --- the fixlen/array announcement order (§4.8) --------------------------

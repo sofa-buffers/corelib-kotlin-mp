@@ -183,6 +183,23 @@ public class IStream {
     private var invalid = false
 
     /**
+     * Latched receiver-limit stop: the [Visitor] rejected a schema-**unbounded**
+     * count or length against a configured cap (CORELIB_PLAN §6.2.1). §6.3 calls
+     * that "a **terminal**, receiver-local **policy** rejection" — the decode stops
+     * where it stopped and this decoder will not finish the message — so it latches
+     * like [invalid] does, and for the same reason: the parse position it held is
+     * meaningless afterwards.
+     *
+     * It is a **separate** latch and never sets [invalid]: §6.2.1 forbids folding a
+     * policy rejection into the `INVALID` outcome, because the same bytes decode
+     * under a looser limit. The category reaches the caller on the error channel,
+     * as [SofabError.LIMIT_EXCEEDED], which is one of the two surfaces §6.3 leaves
+     * open; what [status] must not do is answer [DecodeStatus.COMPLETE] for a
+     * message this decoder abandoned.
+     */
+    private var limitStopped = false
+
+    /**
      * Position just past the word most recently read by [readWord], or `-1` when
      * that word ran past the end of the supplied bytes.
      */
@@ -209,7 +226,9 @@ public class IStream {
      * [SofabError.INVALID_MSG] it is exactly how a stream decoder resynchronises
      * onto the next message, and the *only* way: that outcome is terminal
      * (CORELIB_PLAN §5.2), so until this call [status] keeps answering
-     * [DecodeStatus.INVALID] and [feed] keeps refusing bytes.
+     * [DecodeStatus.INVALID] and [feed] keeps refusing bytes. A
+     * [SofabError.LIMIT_EXCEEDED] stop (§6.2.1, §6.3) clears here too, and it is
+     * likewise the only way to clear it.
      *
      * [acc] is construction-sized state and is not reallocated: only its first
      * [accLen] bytes are ever read, and that counter is zeroed here.
@@ -236,6 +255,7 @@ public class IStream {
         bulkAt = 0
         depth = 0
         invalid = false
+        limitStopped = false
         machineBytes = 0
         // Pure scratch — every path writes it before it reads it — but cleared
         // anyway so "reset restores every declared field" needs no exception.
@@ -267,6 +287,17 @@ public class IStream {
             if (invalid) {
                 return DecodeStatus.INVALID
             }
+            // A receiver-limit stop is terminal too, but the bytes are well-formed:
+            // reporting INVALID would fold a policy rejection into the wire verdict,
+            // which §6.2.1 forbids. INCOMPLETE is what actually happened — the
+            // decoder stopped part-way through a message and will not finish it —
+            // and the LIMIT_EXCEEDED category is on the error channel (§6.3). The
+            // test guards a rejection thrown from a callback at a *field boundary*,
+            // where state and depth are untouched and COMPLETE would otherwise be
+            // reported for a message whose payload was never consumed.
+            if (limitStopped) {
+                return DecodeStatus.INCOMPLETE
+            }
             // COMPLETE only at a true field boundary: no partial field header varint
             // (that is its own state, S_HEADER), no in-progress value/payload/array
             // element (S_IDLE covers the resumable machine and mid-array between
@@ -297,18 +328,32 @@ public class IStream {
      * out of bytes mid-field is *not* that: it suspends and resumes on the next
      * call.
      *
+     * A [SofabError.LIMIT_EXCEEDED] rejection — a receiver cap the [Visitor]
+     * applied to a schema-unbounded count or length (§6.2.1) — is terminal in the
+     * same way (§6.3) and latches separately: further feeds are refused with that
+     * same code, and [status] reports [DecodeStatus.INCOMPLETE] rather than
+     * [DecodeStatus.COMPLETE] for a message this decoder abandoned. It is never
+     * folded into [DecodeStatus.INVALID], because the bytes are well-formed.
+     *
      * @param data backing array
      * @param off start offset
      * @param len number of bytes to consume
      * @param visitor sink for decoded fields
      * @throws SofabException [SofabError.INVALID_MSG] on malformed input, or on any
-     *   call after malformed input was already rejected
+     *   call after malformed input was already rejected; [SofabError.LIMIT_EXCEEDED]
+     *   on any call after a receiver limit stopped the decode
      */
     public fun feed(data: ByteArray, off: Int, len: Int, visitor: Visitor) {
         if (invalid) {
             throw SofabException(
                 SofabError.INVALID_MSG,
                 "decode already INVALID; reset() to start a new message",
+            )
+        }
+        if (limitStopped) {
+            throw SofabException(
+                SofabError.LIMIT_EXCEEDED,
+                "decode already stopped by a receiver limit; reset() to start a new message",
             )
         }
         try {
@@ -318,10 +363,13 @@ public class IStream {
             // a rejection raised anywhere in this class — fast path, resumable state
             // machine, or a schema-bound rejection thrown by generated code from
             // inside a Visitor callback — is terminal, and this is the one place all
-            // of them pass through. LIMIT_EXCEEDED, a receiver-side policy rejection
-            // of well-formed bytes (§6.2.1), deliberately does not latch.
-            if (e.error == SofabError.INVALID_MSG) {
-                invalid = true
+            // of them pass through. LIMIT_EXCEEDED is terminal too (§6.3) but is a
+            // policy rejection of well-formed bytes, so it latches *separately*:
+            // §6.2.1 forbids folding it into the INVALID outcome.
+            when (e.error) {
+                SofabError.INVALID_MSG -> invalid = true
+                SofabError.LIMIT_EXCEEDED -> limitStopped = true
+                else -> Unit
             }
             throw e
         }
