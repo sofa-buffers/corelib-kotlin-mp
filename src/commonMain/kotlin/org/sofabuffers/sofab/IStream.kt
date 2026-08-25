@@ -1059,10 +1059,18 @@ public class IStream {
 
     /**
      * Put the bulk offer to the visitor for an integer array of [c] elements and arm
-     * the fill if it is taken. A destination shorter than the announced count is
-     * refused rather than partially filled: `count` is the wire's claim, and a
-     * consumer that sized against a different number must not be able to turn that
-     * into an out-of-bounds write.
+     * the fill if it is taken.
+     *
+     * A destination the caller handed over that is **shorter than the announced
+     * count** is refused with [SofabError.ARGUMENT] — CORELIB_PLAN §6.6.3's third
+     * refusal tier, the one §6.3 names `InvalidArgument`: the message is
+     * well-formed and inside every bound it declares, so `INVALID_MSG` would call
+     * good bytes malformed and `LIMIT_EXCEEDED` would promise a limit to raise that
+     * nobody configured. What is wrong is the storage this caller offered, and
+     * neither partially filling it nor growing it is an option. Declining the offer
+     * outright — returning `null`, or anything that is not one of the four
+     * primitive integer arrays — is not a destination at all and still falls back
+     * to per-element delivery.
      */
     private fun armBulk(visitor: Visitor, c: Int) {
         bulkB = null
@@ -1074,28 +1082,44 @@ public class IStream {
         if (c == 0) {
             return
         }
-        // One virtual call and one type resolution per ARRAY. Anything that is not a
-        // primitive integer array long enough for the announced count is refused and
-        // the elements go the ordinary way, so neither a miscounted nor a mistyped
-        // destination can overrun.
+        // One virtual call and one type resolution per ARRAY. A mistyped destination
+        // is no offer and the elements go the ordinary way; a rightly typed one that
+        // is too short is the caller's mistake and is reported, never overrun.
         when (val dst = visitor.arrayBulk(id, arrayKind, c)) {
-            is LongArray -> if (dst.size >= c) {
+            is LongArray -> {
+                requireRoom(dst.size, c)
                 bulkL = dst
                 bulkW = W_LONG64
             }
-            is IntArray -> if (dst.size >= c) {
+            is IntArray -> {
+                requireRoom(dst.size, c)
                 bulkI = dst
                 bulkW = W_INT32
             }
-            is ShortArray -> if (dst.size >= c) {
+            is ShortArray -> {
+                requireRoom(dst.size, c)
                 bulkS = dst
                 bulkW = W_SHORT16
             }
-            is ByteArray -> if (dst.size >= c) {
+            is ByteArray -> {
+                requireRoom(dst.size, c)
                 bulkB = dst
                 bulkW = W_BYTE8
             }
             else -> {}
+        }
+    }
+
+    /**
+     * The §6.6.3 destination check: a bulk destination must hold the announced
+     * count. Split out so the four arms share one throw site and stay inlinable.
+     */
+    private fun requireRoom(size: Int, c: Int) {
+        if (size < c) {
+            throw SofabException(
+                SofabError.ARGUMENT,
+                "bulk destination holds $size elements, the array announced $c",
+            )
         }
     }
 

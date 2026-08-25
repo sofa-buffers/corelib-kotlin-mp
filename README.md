@@ -366,7 +366,8 @@ The suite is the shared conformance vectors — read straight from
 that could drift — driven through encode, chunked encode, decode, chunked decode,
 skip-ids and roundtrip, plus the malformed-input and truncation tables, the
 chunk-lifetime scrub, the taking- and copying-sink handovers, the `arrayBulk`
-narrowing rules and the fp32 signaling-NaN round trip.
+narrowing and destination rules, the fp32 signaling-NaN round trip and the
+JVM-only allocation measurement.
 
 Most of the suite is in `commonTest`, so it runs unchanged on every target — the JS
 and native legs are what prove the portable little-endian path produces the JVM's

@@ -196,10 +196,16 @@ public interface Visitor {
      * `count`** elements and the decoder writes straight into `[0, count)` —
      * already ZigZag-decoded for a signed array, exactly the values [signed] would
      * have delivered — with no per-element callback at all, then calls
-     * [arrayBulkEnd]. Return `null`, the default, and the elements arrive through
-     * [unsigned] / [signed] as before. A shorter array than `count`, or any other
-     * type, is treated as `null`, so a miscounted or mistyped destination cannot
-     * overrun.
+     * [arrayBulkEnd]. Return `null`, the default, or anything that is not one of
+     * those four types, and the offer is declined: the elements arrive through
+     * [unsigned] / [signed] as before.
+     *
+     * **A destination of the right type but fewer than `count` elements is
+     * refused**, with [SofabError.ARGUMENT] (CORELIB_PLAN §6.6.3, §6.3): the
+     * message is well-formed and inside every bound it declares, and what does not
+     * fit is the storage this caller offered. It is never partially filled, never
+     * grown and never silently downgraded to per-element delivery — a consumer that
+     * sized against a different number is told so.
      *
      * **The array's width is a bound.** Handing back a narrower array than
      * [LongArray] says the elements are declared that wide, so a value that does
