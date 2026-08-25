@@ -344,17 +344,8 @@ public class IStream {
      *   on any call after a receiver limit stopped the decode
      */
     public fun feed(data: ByteArray, off: Int, len: Int, visitor: Visitor) {
-        if (invalid) {
-            throw SofabException(
-                SofabError.INVALID_MSG,
-                "decode already INVALID; reset() to start a new message",
-            )
-        }
-        if (limitStopped) {
-            throw SofabException(
-                SofabError.LIMIT_EXCEEDED,
-                "decode already stopped by a receiver limit; reset() to start a new message",
-            )
+        if (invalid || limitStopped) {
+            throwLatched()
         }
         try {
             decode(data, off, len, visitor)
@@ -374,6 +365,25 @@ public class IStream {
             throw e
         }
     }
+
+    /**
+     * Rethrow the latched terminal verdict. Out of line, and out of [feed]'s body,
+     * for the same reason [decode] is: [feed] is the hottest entry point in the
+     * class, and message construction inline in it is bytecode the JIT has to carry
+     * through every inlining decision it makes about the caller.
+     */
+    private fun throwLatched(): Nothing =
+        if (invalid) {
+            throw SofabException(
+                SofabError.INVALID_MSG,
+                "decode already INVALID; reset() to start a new message",
+            )
+        } else {
+            throw SofabException(
+                SofabError.LIMIT_EXCEEDED,
+                "decode already stopped by a receiver limit; reset() to start a new message",
+            )
+        }
 
     /**
      * Decode [len] bytes of [data] from [off]. The body of [feed], split out so the
