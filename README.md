@@ -81,8 +81,8 @@ The import namespace is the package `org.sofabuffers.sofab` — the family's fix
 | Streaming **out** | `OStream` writes into a small caller-owned `ByteArray` and hands each full buffer to a `FlushSink`, so a message can exceed the buffer — and RAM. `MIN_OUTPUT_BUFFER` is **1**, and any size at or above it produces byte-identical output. |
 | Streaming **in** | `IStream.feed` accepts arbitrarily small chunks; a message may split at any byte boundary, and string / blob payloads arrive in pieces. Malformed bytes throw `SofabException(INVALID_MSG)`; running out of bytes mid-field is **not** an error — `feed` suspends and resumes. `status` afterwards tells a `COMPLETE` message from a truncated `INCOMPLETE` one; it never throws, and there is no finish/finalize step. A rejection is **terminal** and `reset()` is what clears it. |
 | Chunking costs only what straddles | Whole fields are decoded by a cursor advanced over the buffer; only the one construct that would run past the end of the supplied bytes goes through the resumable byte-at-a-time machine, and the rest of the chunk goes straight back to the bulk path — inside an array as much as between fields. A boundary in a 200-element array costs one element, not the remainder (`StreamingTest` asserts it). |
-| No per-field allocation | State lives in caller-provided arrays plus one small object per direction. Scalars stay primitive (`Long` / `Double`) — no boxing on the hot path. `IStream` allocates an 8-byte carry array only if a float straddles a chunk; `OStream` an `IntArray` only when sequences nest past depth one. |
-| Sparse sequence framing, still one pass | `writeSequenceBeginLazy` holds a sequence header back until a child is actually written, so a sequence-typed **field** with no content is omitted rather than framed empty — decided in a single forward pass, with no sub-message buffering. `writeSequenceEnd` drops such a sequence; `writeSequenceEndKeep` forces the frame out where it carries information (a wrapper-array **element**, whose presence gives the array its length). Held-back ids are encoder state, not buffer content, so a one-byte output buffer still produces the one-shot bytes, and the run grows to the full `MAX_DEPTH` (255). |
+| No allocation after construction | State lives in caller-provided arrays plus one small object per direction, whose fixed-size working state — the encoder's `MAX_DEPTH` hold-back run, the decoder's 8-byte scalar landing zone — is sized in the constructor. After that, `write`, `flush` and `feed` allocate nothing at all, and no wire number sizes anything. Scalars stay primitive (`Long` / `Double`) — no boxing on the hot path on JVM and native. |
+| Sparse sequence framing, still one pass | `writeSequenceBeginLazy` holds a sequence header back until a child is actually written, so a sequence-typed **field** with no content is omitted rather than framed empty — decided in a single forward pass, with no sub-message buffering. `writeSequenceEnd` drops such a sequence; `writeSequenceEndKeep` forces the frame out where it carries information (a wrapper-array **element**, whose presence gives the array its length). Held-back ids are encoder state, not buffer content, so a one-byte output buffer still produces the one-shot bytes, and the run reaches the full `MAX_DEPTH` (255), sized once when the `OStream` is constructed. |
 | Bit-exact floats on every target | `fp32` travels as **raw wire bits**: the decoder calls `Visitor.fp32Bits`, whose default widens to `Float` and calls `fp32`, and `OStream.writeFp32Bits` writes them back. That pair is what makes a signaling NaN round-trip on Kotlin/JS, where every `Float` is a double and passing the value through one sets the quiet bit. A value consumer overrides `fp32` and never sees the difference. |
 | One codec, four runtimes | The whole encoder and decoder are `commonMain`. Only the little-endian word access is per-target (`expect`/`actual`), and the same `commonTest` suite runs on JVM, Node and native. |
 | No reflection, no runtime codegen | Plain function calls and one interface with default methods. Fits GraalVM native-image, Kotlin/Native and locked-down runtimes alike. |
@@ -237,7 +237,7 @@ that a corelib cannot know: sparse omission against declared defaults,
 field whose wire type contradicts the schema, and UTF-8 validation of a
 materialized string via `Utf8.decode`.
 
-### Generated-code support layer
+## Generated-code support layer
 
 Around every codec call, generated code does the same few things: put an element
 at the index its id names, grow an array as elements actually arrive, reassemble a
@@ -285,9 +285,10 @@ direction.
   sink**, at construction and at every `bufferSet`, both of which reject
   `buffer.size - offset < MIN_OUTPUT_BUFFER` with `IllegalArgumentException` where
   the buffer is handed over — never partway through a message. A buffer installed
-  **without** a sink is subject to no minimum: no flush can occur, so it either
-  holds the message or raises `BUFFER_FULL`, and sizing from a generated `MAX_SIZE`
-  stays exact.
+  **without** a sink is subject to no minimum — **including a zero-length one**:
+  no flush can occur, so it either holds the message or raises `BUFFER_FULL`, and
+  sizing from a generated `MAX_SIZE` stays exact, down to the all-default message
+  whose `MAX_SIZE` is `0`.
   **Pass-through is not implemented**: a sink never receives memory other than the
   buffer it was given.
   A field is written with as few stores as its shape allows — a multi-byte varint
@@ -308,16 +309,32 @@ direction.
   `writeFixlen(id, data, from, length, FixlenType.STRING)`, validates its range with
   `Utf8.valid` and refuses a malformed payload the same way; `FixlenType.BLOB` is
   the type for opaque bytes and is never validated.
-- **Input buffer (decoding).** `feed` runs a cursor over the caller's array,
-  **aliasing** it. Scalars and floats are passed by value (`Long` / `Double` / raw
-  `Int` bits); strings and blobs reach the visitor as a **window** (`data`,
-  `chunkOffset`, `chunkLength`) into that array, valid **only for the duration of
-  the callback** — no `String` or fresh array is constructed, so a visitor that
-  retains bytes must copy the range. `feed` is this port's only decode surface:
-  there is no one-shot `decode(buffer)` handing out views that outlive the call, and
-  a caller may reuse or discard a chunk the instant `feed` returns. The decoder
-  allocates nothing per field; its only heap use is an 8-byte carry array, allocated
-  the first time a float payload straddles a chunk boundary and reused thereafter.
+- **Input buffer (decoding).** The caller owns the bytes and must keep them alive
+  for the duration of the `feed` call — no longer. `feed` runs a cursor over that
+  array; scalars and floats are passed by value (`Long` / `Double` / raw `Int`
+  bits), and a `string` or `blob` is **passed through the callback** in pieces, as
+  `(id, total, offset, data, chunkOffset, chunkLength)` — the payload's total, this
+  piece's offset, and the caller's own buffer. That is the second of the two routes
+  a value may take to a caller: the bytes are the caller's own input, nothing the
+  decoder produced, and the range is valid **only until the callback returns**, so
+  a consumer that keeps the value copies it first — `PayloadAcc` and `Utf8.decode`
+  are what generated code copies it with. Nothing the decoder hands out outlives
+  the call that delivered it: there is no payload position, no "valid until the
+  next feed" value, and `feed` is the only decode surface, so no one-shot entry
+  point differs from it.
+- **No wire value decides an allocation in the codec.** Not a count, not a length,
+  not a chunk boundary. There is **no library-owned accumulator for
+  chunk-straddling fields**: a `string` / `blob` split across feeds arrives in
+  pieces and is joined in storage the consumer owns, and the only working state the
+  codec keeps — the decoder's 8-byte scalar landing zone, the encoder's
+  `MAX_DEPTH`-sized hold-back run — is sized from constants of the format when the
+  `IStream` / `OStream` is constructed and never afterwards. Reuse via `reset()`
+  keeps that state; a codec built per message pays for it once, in its constructor.
+- **The static helper layer allocates; the codec does not.** `Seq`, `PayloadAcc`
+  and `Utf8` ship in this library for reuse but are not part of the codec: they run
+  on the generated layer's behalf, from inside a visitor callback or from a caller,
+  and the storage they take belongs to whoever called them. Their buffers are not a
+  codec allocation.
 
 | Buffer | Allocated by | Owned by | Must outlive |
 |---|---|---|---|
@@ -326,7 +343,14 @@ direction.
 | input chunk | caller | caller | the `feed` call |
 | string / blob window | caller | caller | the `string` / `blob` callback |
 
-The hot path allocates nothing on either side.
+The hot path allocates nothing on either side. That is measured, not only
+stated: `AllocationTest` (JVM) counts thread allocation across a complete encode
+and a complete decode and holds the count at zero after construction. Kotlin/JS
+and Kotlin/Native offer no per-thread allocation counter, so on those targets the
+property is **untested** — the codec is one `commonMain` source set, so it is the
+same code the JVM measurement covers. On Kotlin/JS a `Long` is additionally a heap
+object the runtime creates to represent a value; its size comes from the type, not
+from the message.
 
 ## Build & test
 
