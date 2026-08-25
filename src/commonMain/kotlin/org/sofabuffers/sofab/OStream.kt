@@ -63,12 +63,11 @@ package org.sofabuffers.sofab
  * val used = os.bytesUsed
  * ```
  *
- * @param buffer caller-owned output buffer (non-empty)
+ * @param buffer caller-owned output buffer
  * @param offset initial write position (`0..buffer.size`)
  * @param sink flush sink, or `null` for none
- * @throws IllegalArgumentException if the buffer is empty, the offset is out of
- *   range, or a sink is given and the buffer leaves less than
- *   [Sofab.MIN_OUTPUT_BUFFER] usable bytes
+ * @throws IllegalArgumentException if the offset is out of range, or a sink is
+ *   given and the buffer leaves less than [Sofab.MIN_OUTPUT_BUFFER] usable bytes
  */
 public class OStream(
     buffer: ByteArray,
@@ -174,10 +173,10 @@ public class OStream(
      * which is why a sink cannot hand back storage the encoder could not write a
      * single byte into. On a sink-less stream no minimum applies.
      *
-     * @param buffer new caller-owned output buffer (non-empty)
+     * @param buffer new caller-owned output buffer
      * @param offset initial write position (`0..buffer.size`)
-     * @throws IllegalArgumentException if the buffer is empty, the offset is out of
-     *   range, or this stream carries a sink and the buffer leaves less than
+     * @throws IllegalArgumentException if the offset is out of range, or this
+     *   stream carries a sink and the buffer leaves less than
      *   [Sofab.MIN_OUTPUT_BUFFER] usable bytes
      */
     public fun bufferSet(buffer: ByteArray, offset: Int) {
@@ -1187,12 +1186,14 @@ public class OStream(
          * there rather than partway through a message (CORELIB_PLAN §5.1).
          *
          * [Sofab.MIN_OUTPUT_BUFFER] applies only when a `sink` is present. Without
-         * one no flush can occur, so §5.1 imposes no minimum: the buffer either holds
-         * the message or reports [SofabError.BUFFER_FULL], and a caller sizing from a
-         * generated `MAX_SIZE` keeps an exact fit.
+         * one no flush can occur, so §5.1.4 imposes **no minimum at all** — not even
+         * one byte: the buffer either holds the message or reports
+         * [SofabError.BUFFER_FULL], and a caller sizing from a generated `MAX_SIZE`
+         * keeps an exact fit. An all-default message has `MAX_SIZE == 0`
+         * (MESSAGE_SPEC §2), so the zero-length buffer is a case this path must
+         * accept rather than reject.
          */
         fun checkHandover(buffer: ByteArray, offset: Int, sink: FlushSink?) {
-            require(buffer.isNotEmpty()) { "buffer must be non-empty" }
             require(offset in 0..buffer.size) { "offset out of range" }
             require(sink == null || buffer.size - offset >= Sofab.MIN_OUTPUT_BUFFER) {
                 "streaming buffer leaves ${buffer.size - offset} usable bytes, " +
