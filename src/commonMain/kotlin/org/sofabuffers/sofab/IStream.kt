@@ -143,11 +143,15 @@ public class IStream {
     private var fixlenRemaining = 0
 
     /**
-     * Carry buffer for a float payload split across feeds. Allocated on first use:
-     * a decode whose fp32/fp64 values never straddle a chunk boundary — the
-     * whole-message case — never allocates it at all.
+     * Landing zone for a float payload split across feeds — eight bytes, the
+     * widest fixlen scalar the format carries.
+     *
+     * **Sized at construction** (CORELIB_PLAN §6.6.2): its size comes from this
+     * document, never from the wire, so it is bounded working state and belongs in
+     * the constructor. Allocating it on the first straddling float would put an
+     * allocation on a `feed` path, which §6.6 forbids.
      */
-    private var acc: ByteArray? = null
+    private val acc = ByteArray(8)
     private var accLen = 0
 
     /**
@@ -207,8 +211,8 @@ public class IStream {
      * (CORELIB_PLAN §5.2), so until this call [status] keeps answering
      * [DecodeStatus.INVALID] and [feed] keeps refusing bytes.
      *
-     * [acc] keeps its allocation: retaining it is the point of reuse, and only its
-     * first [accLen] bytes are ever read, which is zeroed here.
+     * [acc] is construction-sized state and is not reallocated: only its first
+     * [accLen] bytes are ever read, and that counter is zeroed here.
      */
     public fun reset() {
         varintValue = 0
@@ -1362,11 +1366,7 @@ public class IStream {
      * left over to reject.
      */
     private fun stepFixlenVal(b: Int, visitor: Visitor) {
-        var a = acc
-        if (a == null) {
-            a = ByteArray(8) // first straddling float on this stream
-            acc = a
-        }
+        val a = acc
         a[accLen++] = b.toByte()
         fixlenRemaining--
         if (fixlenRemaining != 0) {
