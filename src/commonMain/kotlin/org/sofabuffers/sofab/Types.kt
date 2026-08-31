@@ -39,7 +39,14 @@ public enum class DecodeStatus {
  * no wire-format equivalent (CORELIB_PLAN §6.2.1).
  */
 public enum class SofabError {
-    /** Invalid caller argument (e.g. a field id outside `0..ID_MAX`). */
+    /**
+     * Invalid caller argument: a field id outside `0..ID_MAX`, a destination too
+     * short for the value it was handed — or a decode call that stated **no**
+     * receiver cap for a schema-unbounded field, which §6.2.1 requires the caller
+     * to supply and forbids reading as *unlimited*. That last one is deliberately
+     * not [LIMIT_EXCEEDED]: the mistake is in the call, and naming it a limit
+     * would promise a limit to raise that nobody ever configured (§6.3).
+     */
     ARGUMENT,
 
     /** The output buffer is full and no [FlushSink] is available. */
@@ -62,8 +69,19 @@ public enum class SofabError {
      * an unbounded (dynamic) field — one whose schema declares no
      * `count`/`maxlen` (CORELIB_PLAN §6.2.1). The limits
      * (`max_dyn_array_count`, `max_dyn_string_len`, `max_dyn_blob_len`) are
-     * configured per deployment and enforced by generated code on the count /
-     * length the corelib exposes *before* any allocation.
+     * configured per deployment, and the **number is always generated code's** —
+     * the codec holds none, defaults none and clamps to none. The **comparison**
+     * runs wherever the count or length is already in hand before an allocation:
+     * in the generated visitor for a native array's count header, and inside
+     * [PayloadAcc] and [Seq] for a payload length and a row index, which take the
+     * caller's cap as an argument (§6.2.1, "passing a limit in is not the codec
+     * holding one"). Each rule is enforced in exactly one of the two places.
+     *
+     * **Never for a cap that was not stated.** This category says *"raise my
+     * limit, or the sender must send less"*, so it presupposes a limit somebody
+     * set. A call that supplies no cap for a schema-unbounded field still decodes
+     * nothing — §6.2.1 forbids reading an omitted cap as *unlimited* — but the
+     * refusal is [ARGUMENT], not this.
      *
      * **Not wire malformation.** The same message decodes under a looser or
      * unset limit, so this category is kept strictly distinct from

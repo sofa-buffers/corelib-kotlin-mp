@@ -231,11 +231,18 @@ val assembled = dec.value                   // built incrementally, never fully 
 
 Both halves are the same code path — the one-shot pair is a thin wrapper over the
 streaming one — so a message that streams and a message that fits in a buffer
-produce identical bytes. Generated code is also where the **schema** rules live
-that a corelib cannot know: sparse omission against declared defaults,
-`maxlen` / `count` / integer-width bounds reported as `INVALID`, the skip of a
-field whose wire type contradicts the schema, and UTF-8 validation of a
-materialized string via `Utf8.decode`.
+produce identical bytes. Generated code is also where the **numbers** live that a
+corelib cannot know: sparse omission against declared defaults, the `maxlen`,
+`count` and integer-width bounds reported as `INVALID`, the deployment's
+`max_dyn_*` receiver caps reported as `LIMIT_EXCEEDED`, the skip of a field whose
+wire type contradicts the schema, and UTF-8 validation of a materialized string
+via `Utf8.decode`. The support layer below **takes two of those numbers as
+arguments** and compares against them where it already stands — at the payload
+length and at the row index, before either allocates. It holds none of its own:
+nothing here defaults a limit, invents one it was not given, reads an omitted
+argument as unlimited, or clamps to one (CORELIB_PLAN §6.2.1). A call that states
+no cap for a schema-unbounded field decodes nothing either, and says so as
+`ARGUMENT` — a limit nobody set is not a limit to raise (§6.3).
 
 ## Generated-code support layer
 
@@ -249,11 +256,11 @@ package.
 
 | symbol | what it is |
 |---|---|
-| `Seq.reserveRowBytes` … `reserveRowBooleans`, `Seq.reserveRowList` | place a matrix row at the index its element id names, filling a gap with the empty row rather than shifting every later row down (MESSAGE_SPEC §5.1 / §7.4) |
+| `Seq.reserveRowBytes` … `reserveRowBooleans`, `Seq.reserveRowList` | place a matrix row at the index its element id names, filling a gap with the empty row rather than shifting every later row down (MESSAGE_SPEC §5.1 / §7.4) — bounding that index first, against the caller's schema `count` (`INVALID_MSG`) or, where the schema declares none, the caller's receiver cap (`LIMIT_EXCEEDED`) |
 | `Seq.ensureCap` (one overload per array type) | the array-growth policy: double, stop at the announced count, and never allocate from a count the wire claimed but has not delivered |
 | `Seq.ARRAY_INIT_CAP`, `Seq.EMPTY_BYTES` … `EMPTY_BOOLEANS` | the bounded first reservation, and the shared zero-length arrays a field initializer points at |
 | `Seq.boolsToBytes` | the one materialization the encode side still needs: `bool` travels as an unsigned `0`/`1`, the one element kind with no `writeArray*` overload of its own |
-| `PayloadAcc` | a growable byte sink for the two places the size is not known in advance — reassembling a `string` / `blob` payload split across feeds, and draining an `OStream`'s `FlushSink` as a `FlushSink` itself. A payload that arrives whole never touches its buffer, and the value never depends on where the split fell |
+| `PayloadAcc` | a growable byte sink for the two places the size is not known in advance — reassembling a `string` / `blob` payload split across feeds, and draining an `OStream`'s `FlushSink` as a `FlushSink` itself. A payload that arrives whole never touches its buffer, and the value never depends on where the split fell. Reassembly bounds the announced length first, against the caller's schema `maxlen` (`INVALID_MSG`) or, where the schema declares none, the caller's receiver cap (`LIMIT_EXCEEDED`) |
 | `Utf8.decode` | validate a byte range and materialize it, in that order — the only order in which invalid UTF-8 can still be rejected (§6.4) |
 
 Kotlin's unsigned arrays are `value` classes over their signed peers rather than

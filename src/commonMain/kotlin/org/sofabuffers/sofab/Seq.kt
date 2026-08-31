@@ -41,6 +41,23 @@ package org.sofabuffers.sofab
  * **A count is untrusted**: it is the wire's claim about how many elements
  * follow, bounded by nothing until a schema `count` or a receiver limit bounds
  * it, so no function here allocates from a count alone.
+ *
+ * **A row index is untrusted too, and its two bounds travel as arguments.** A
+ * matrix row's id *is* its index, so `reserveRow*` grows the outer list to
+ * `id + 1` and one over-index element is by itself the allocation an untrusted
+ * index buys. Each takes the outer array's schema `count` and the deployment's
+ * receiver cap and rejects the id before the list grows — the count/index header,
+ * the site CORELIB_PLAN §6.2.1 requires, reached through a call generated code
+ * already makes. Both numbers are the **caller's**: supplied per call, used for
+ * that one comparison, never retained. Which one applies is the schema's
+ * decision, not this object's — a declared `count` makes an over-index element
+ * malformed input (`INVALID_MSG`, MESSAGE_SPEC §7.1) and forbids the receiver cap
+ * from touching the field at all, while an array the schema leaves uncounted is
+ * bounded by the receiver cap and answers the `LIMIT_EXCEEDED` policy category
+ * (§6.3). Nothing here holds, defaults to or clamps to a limit of its own — and a
+ * call that states no cap at all admits no row either, reported as `ARGUMENT`,
+ * the mistake being in the call rather than in a receiver policy nobody
+ * configured.
  */
 public object Seq {
 
@@ -111,18 +128,28 @@ public object Seq {
      * The new row is handed back so the caller can fill it by index instead of
      * reading it out of the list once per element.
      *
-     * [id] is the wire's, so the caller bounds it against the outer array's
-     * schema capacity *before* calling: this grows the list to hold it. [n] is
-     * likewise the caller's capped reservation and never the wire count — an
-     * untrusted count must not be able to force an up-front allocation — and
+     * [id] is the wire's, and it is bounded here before the list grows: against
+     * [cap] where the schema counts the outer array, against [rcap] where it does
+     * not. [n] is the caller's capped reservation and never the raw wire count —
+     * an untrusted count must not be able to force an up-front allocation — and
      * [ensureCap] grows the row as elements arrive.
      *
      * @param rows the outer list, one entry per row
      * @param id index of the row to reserve
      * @param n initial length of the new row
+     * @param cap the outer array's schema `count`, or a negative number where the
+     *     schema declares none
+     * @param rcap the receiver's configured `max_dyn_array_count`, applied only
+     *     where [cap] is negative; a negative [rcap] states no cap at all and
+     *     admits no row
      * @return the new row, now at index [id]
+     * @throws SofabException [SofabError.INVALID_MSG] when [id] reaches a declared
+     *     [cap]; [SofabError.LIMIT_EXCEEDED] when a schema-uncounted [id] reaches
+     *     a stated [rcap]; [SofabError.ARGUMENT] when a schema-uncounted array was
+     *     handed no cap at all ([rcap] negative)
      */
-    public fun reserveRowBytes(rows: MutableList<ByteArray>, id: Int, n: Int): ByteArray {
+    public fun reserveRowBytes(rows: MutableList<ByteArray>, id: Int, n: Int, cap: Int, rcap: Int): ByteArray {
+        boundIndex(id, cap, rcap)
         val row = ByteArray(n)
         while (rows.size < id) rows.add(EMPTY_BYTES)
         if (rows.size == id) rows.add(row) else rows[id] = row
@@ -135,9 +162,12 @@ public object Seq {
      * @param rows the outer list, one entry per row
      * @param id index of the row to reserve
      * @param n initial length of the new row
+     * @param cap the outer array's schema `count`, or negative where it has none
+     * @param rcap the receiver's configured `max_dyn_array_count`
      * @return the new row, now at index [id]
      */
-    public fun reserveRowShorts(rows: MutableList<ShortArray>, id: Int, n: Int): ShortArray {
+    public fun reserveRowShorts(rows: MutableList<ShortArray>, id: Int, n: Int, cap: Int, rcap: Int): ShortArray {
+        boundIndex(id, cap, rcap)
         val row = ShortArray(n)
         while (rows.size < id) rows.add(EMPTY_SHORTS)
         if (rows.size == id) rows.add(row) else rows[id] = row
@@ -150,9 +180,12 @@ public object Seq {
      * @param rows the outer list, one entry per row
      * @param id index of the row to reserve
      * @param n initial length of the new row
+     * @param cap the outer array's schema `count`, or negative where it has none
+     * @param rcap the receiver's configured `max_dyn_array_count`
      * @return the new row, now at index [id]
      */
-    public fun reserveRowInts(rows: MutableList<IntArray>, id: Int, n: Int): IntArray {
+    public fun reserveRowInts(rows: MutableList<IntArray>, id: Int, n: Int, cap: Int, rcap: Int): IntArray {
+        boundIndex(id, cap, rcap)
         val row = IntArray(n)
         while (rows.size < id) rows.add(EMPTY_INTS)
         if (rows.size == id) rows.add(row) else rows[id] = row
@@ -165,9 +198,12 @@ public object Seq {
      * @param rows the outer list, one entry per row
      * @param id index of the row to reserve
      * @param n initial length of the new row
+     * @param cap the outer array's schema `count`, or negative where it has none
+     * @param rcap the receiver's configured `max_dyn_array_count`
      * @return the new row, now at index [id]
      */
-    public fun reserveRowLongs(rows: MutableList<LongArray>, id: Int, n: Int): LongArray {
+    public fun reserveRowLongs(rows: MutableList<LongArray>, id: Int, n: Int, cap: Int, rcap: Int): LongArray {
+        boundIndex(id, cap, rcap)
         val row = LongArray(n)
         while (rows.size < id) rows.add(EMPTY_LONGS)
         if (rows.size == id) rows.add(row) else rows[id] = row
@@ -180,9 +216,12 @@ public object Seq {
      * @param rows the outer list, one entry per row
      * @param id index of the row to reserve
      * @param n initial length of the new row
+     * @param cap the outer array's schema `count`, or negative where it has none
+     * @param rcap the receiver's configured `max_dyn_array_count`
      * @return the new row, now at index [id]
      */
-    public fun reserveRowUBytes(rows: MutableList<UByteArray>, id: Int, n: Int): UByteArray {
+    public fun reserveRowUBytes(rows: MutableList<UByteArray>, id: Int, n: Int, cap: Int, rcap: Int): UByteArray {
+        boundIndex(id, cap, rcap)
         val row = UByteArray(n)
         while (rows.size < id) rows.add(EMPTY_UBYTES)
         if (rows.size == id) rows.add(row) else rows[id] = row
@@ -195,9 +234,12 @@ public object Seq {
      * @param rows the outer list, one entry per row
      * @param id index of the row to reserve
      * @param n initial length of the new row
+     * @param cap the outer array's schema `count`, or negative where it has none
+     * @param rcap the receiver's configured `max_dyn_array_count`
      * @return the new row, now at index [id]
      */
-    public fun reserveRowUShorts(rows: MutableList<UShortArray>, id: Int, n: Int): UShortArray {
+    public fun reserveRowUShorts(rows: MutableList<UShortArray>, id: Int, n: Int, cap: Int, rcap: Int): UShortArray {
+        boundIndex(id, cap, rcap)
         val row = UShortArray(n)
         while (rows.size < id) rows.add(EMPTY_USHORTS)
         if (rows.size == id) rows.add(row) else rows[id] = row
@@ -210,9 +252,12 @@ public object Seq {
      * @param rows the outer list, one entry per row
      * @param id index of the row to reserve
      * @param n initial length of the new row
+     * @param cap the outer array's schema `count`, or negative where it has none
+     * @param rcap the receiver's configured `max_dyn_array_count`
      * @return the new row, now at index [id]
      */
-    public fun reserveRowUInts(rows: MutableList<UIntArray>, id: Int, n: Int): UIntArray {
+    public fun reserveRowUInts(rows: MutableList<UIntArray>, id: Int, n: Int, cap: Int, rcap: Int): UIntArray {
+        boundIndex(id, cap, rcap)
         val row = UIntArray(n)
         while (rows.size < id) rows.add(EMPTY_UINTS)
         if (rows.size == id) rows.add(row) else rows[id] = row
@@ -225,9 +270,12 @@ public object Seq {
      * @param rows the outer list, one entry per row
      * @param id index of the row to reserve
      * @param n initial length of the new row
+     * @param cap the outer array's schema `count`, or negative where it has none
+     * @param rcap the receiver's configured `max_dyn_array_count`
      * @return the new row, now at index [id]
      */
-    public fun reserveRowULongs(rows: MutableList<ULongArray>, id: Int, n: Int): ULongArray {
+    public fun reserveRowULongs(rows: MutableList<ULongArray>, id: Int, n: Int, cap: Int, rcap: Int): ULongArray {
+        boundIndex(id, cap, rcap)
         val row = ULongArray(n)
         while (rows.size < id) rows.add(EMPTY_ULONGS)
         if (rows.size == id) rows.add(row) else rows[id] = row
@@ -240,9 +288,12 @@ public object Seq {
      * @param rows the outer list, one entry per row
      * @param id index of the row to reserve
      * @param n initial length of the new row
+     * @param cap the outer array's schema `count`, or negative where it has none
+     * @param rcap the receiver's configured `max_dyn_array_count`
      * @return the new row, now at index [id]
      */
-    public fun reserveRowFloats(rows: MutableList<FloatArray>, id: Int, n: Int): FloatArray {
+    public fun reserveRowFloats(rows: MutableList<FloatArray>, id: Int, n: Int, cap: Int, rcap: Int): FloatArray {
+        boundIndex(id, cap, rcap)
         val row = FloatArray(n)
         while (rows.size < id) rows.add(EMPTY_FLOATS)
         if (rows.size == id) rows.add(row) else rows[id] = row
@@ -255,9 +306,12 @@ public object Seq {
      * @param rows the outer list, one entry per row
      * @param id index of the row to reserve
      * @param n initial length of the new row
+     * @param cap the outer array's schema `count`, or negative where it has none
+     * @param rcap the receiver's configured `max_dyn_array_count`
      * @return the new row, now at index [id]
      */
-    public fun reserveRowDoubles(rows: MutableList<DoubleArray>, id: Int, n: Int): DoubleArray {
+    public fun reserveRowDoubles(rows: MutableList<DoubleArray>, id: Int, n: Int, cap: Int, rcap: Int): DoubleArray {
+        boundIndex(id, cap, rcap)
         val row = DoubleArray(n)
         while (rows.size < id) rows.add(EMPTY_DOUBLES)
         if (rows.size == id) rows.add(row) else rows[id] = row
@@ -270,9 +324,12 @@ public object Seq {
      * @param rows the outer list, one entry per row
      * @param id index of the row to reserve
      * @param n initial length of the new row
+     * @param cap the outer array's schema `count`, or negative where it has none
+     * @param rcap the receiver's configured `max_dyn_array_count`
      * @return the new row, now at index [id]
      */
-    public fun reserveRowBooleans(rows: MutableList<BooleanArray>, id: Int, n: Int): BooleanArray {
+    public fun reserveRowBooleans(rows: MutableList<BooleanArray>, id: Int, n: Int, cap: Int, rcap: Int): BooleanArray {
+        boundIndex(id, cap, rcap)
         val row = BooleanArray(n)
         while (rows.size < id) rows.add(EMPTY_BOOLEANS)
         if (rows.size == id) rows.add(row) else rows[id] = row
@@ -296,15 +353,80 @@ public object Seq {
      *
      * @param rows the outer list, one entry per row
      * @param id index of the row to reserve
+     * @param cap the outer array's schema `count`, or negative where it has none
+     * @param rcap the receiver's configured `max_dyn_array_count`
      * @param T row element type
+     * @throws SofabException [SofabError.INVALID_MSG] when [id] reaches a declared
+     *     [cap]; [SofabError.LIMIT_EXCEEDED] when a schema-uncounted [id] reaches
+     *     a stated [rcap]; [SofabError.ARGUMENT] when a schema-uncounted array was
+     *     handed no cap at all ([rcap] negative)
      */
-    public fun <T> reserveRowList(rows: MutableList<MutableList<T>>, id: Int) {
+    public fun <T> reserveRowList(rows: MutableList<MutableList<T>>, id: Int, cap: Int, rcap: Int) {
+        boundIndex(id, cap, rcap)
         while (rows.size < id) rows.add(mutableListOf())
         if (rows.size == id) {
             rows.add(mutableListOf())
             return
         }
         rows[id].clear()
+    }
+
+    /**
+     * Reject a row index the caller may not accept, before the list is grown to
+     * hold it (CORELIB_PLAN §6.2.1).
+     *
+     * Exactly one of the two numbers applies, and the schema picks which — the
+     * bound and the category are one decision with two answers, which is why they
+     * are one comparison here rather than two guards in the caller. A declared
+     * [cap] is the outer array's schema `count`: an element past it contradicts
+     * the schema both peers agreed on, so it is malformed input (MESSAGE_SPEC
+     * §7.1) and the receiver cap must not be applied to that field at all. An
+     * array the schema leaves uncounted grows to *highest present id + 1* by
+     * design (§5.1), so its index is its length and [rcap] — the deployment's
+     * capacity decision — is what bounds it; the bytes are well formed, the same
+     * element decodes for a receiver configured more loosely, and the verdict is
+     * the [SofabError.LIMIT_EXCEEDED] policy category (§6.3) — or, where the call
+     * stated no cap at all, [SofabError.ARGUMENT]; see [refuse].
+     *
+     * Neither number is this object's. Both arrive per call, are used for this one
+     * comparison and are not retained; nothing here defaults, invents or clamps to
+     * a limit, and an over-index element is rejected, never dropped or folded into
+     * a lower slot.
+     */
+    private fun boundIndex(id: Int, cap: Int, rcap: Int) {
+        if (cap >= 0) {
+            if (id >= cap) {
+                throw SofabException(SofabError.INVALID_MSG, "row index $id above declared count $cap")
+            }
+        } else if (id >= rcap) {
+            refuse(id, rcap)
+        }
+    }
+
+    /**
+     * Name the refusal a schema-uncounted [id] has earned: a stated cap it reaches,
+     * or a cap that was never stated at all (CORELIB_PLAN §6.3).
+     *
+     * Out of line, so the check itself stays a single compare on a call generated
+     * code already makes and the message building never sits on the hot path.
+     *
+     * The two categories say different things and are not interchangeable.
+     * [SofabError.LIMIT_EXCEEDED] means *"raise my limit, or the sender must send
+     * less"*: a receiver cap was configured, these bytes are well formed, and the
+     * same element decodes for a receiver configured more loosely. A negative
+     * [rcap] is not a small limit and not an unlimited one — it is the **absence**
+     * of the number §6.2.1 requires the caller to supply, so the mistake is in the
+     * **call** and the category is [SofabError.ARGUMENT] (§6.3's
+     * `InvalidArgument`). Reporting that as `LIMIT_EXCEEDED` would name a receiver
+     * policy the deployment never set and promise a limit to raise that does not
+     * exist. The refusal itself is the same either way: §6.2.1 forbids reading an
+     * omitted cap as *unlimited*, so an unstated cap still admits no row.
+     */
+    private fun refuse(id: Int, rcap: Int): Nothing {
+        if (rcap < 0) {
+            throw SofabException(SofabError.ARGUMENT, "max_dyn_array_count not stated (cap $rcap) for row index $id")
+        }
+        throw SofabException(SofabError.LIMIT_EXCEEDED, "row index $id above configured limit $rcap")
     }
 
     // -----------------------------------------------------------------------

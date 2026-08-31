@@ -11,10 +11,23 @@ package org.sofabuffers.sofab
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class SeqTest {
+
+    /**
+     * The two numbers every `reserveRow*` call carries (CORELIB_PLAN §6.2.1).
+     * This test class is the caller, so it states them: [NO_COUNT] is what
+     * generated code passes for an outer array whose schema declares no `count`,
+     * and [RCAP] stands in for the deployment's configured `max_dyn_array_count`
+     * — above every id used below, so only the two bound tests meet it.
+     */
+    private val NO_COUNT = -1
+
+    /** @see NO_COUNT */
+    private val RCAP = 16384
 
     // -----------------------------------------------------------------------
     // Growth
@@ -134,13 +147,111 @@ class SeqTest {
     // Row placement
     // -----------------------------------------------------------------------
 
+    // -----------------------------------------------------------------------
+    // The two bounds the caller passes in (CORELIB_PLAN §6.2.1)
+    // -----------------------------------------------------------------------
+
+    @Test
+    fun anUncountedRowIndexAboveTheReceiverCapIsLimitExceeded() {
+        // A wrapper array carries no count header: the element's id IS the length
+        // it forces, so the id is what has to be bounded — and before the list is
+        // grown to hold it. The bytes are well formed, so the category is the
+        // policy one and not INVALID_MSG (§6.3).
+        val rows = mutableListOf<IntArray>()
+        val e = assertFailsWith<SofabException> { Seq.reserveRowInts(rows, 4, 1, NO_COUNT, 4) }
+        assertEquals(SofabError.LIMIT_EXCEEDED, e.error)
+        assertEquals(0, rows.size, "rejected before the list grows")
+
+        // The boundary: an id of cap - 1 is the last one the cap admits.
+        assertEquals(1, Seq.reserveRowInts(rows, 3, 1, NO_COUNT, 4).size)
+        assertEquals(4, rows.size)
+    }
+
+    @Test
+    fun aCountedRowIndexAboveTheSchemaCountIsInvalid() {
+        // A declared `count` is a statement about validity (MESSAGE_SPEC §7.1): an
+        // element past it contradicts the schema both peers agreed on, so it is
+        // malformed input and never the policy category.
+        val rows = mutableListOf<LongArray>()
+        val e = assertFailsWith<SofabException> { Seq.reserveRowLongs(rows, 2, 1, 2, RCAP) }
+        assertEquals(SofabError.INVALID_MSG, e.error)
+        assertEquals(0, rows.size, "rejected before the list grows")
+    }
+
+    @Test
+    fun theReceiverCapIsNeverAppliedToASchemaCountedArray() {
+        // §6.2.1: the caps govern only arrays the schema left uncounted. A row
+        // inside its declared count is placed whatever the receiver cap says, so
+        // the two can never both be in play.
+        val rows = mutableListOf<IntArray>()
+        assertEquals(1, Seq.reserveRowInts(rows, 3, 1, 4, 1).size)
+        assertEquals(4, rows.size)
+    }
+
+    @Test
+    fun aWrapperRowTakesTheSameTwoBounds() {
+        // reserveRowList grows the same outer list to id + 1 and is bounded the
+        // same way.
+        val rows = mutableListOf<MutableList<String>>()
+        val e = assertFailsWith<SofabException> { Seq.reserveRowList(rows, 4, NO_COUNT, 4) }
+        assertEquals(SofabError.LIMIT_EXCEEDED, e.error)
+        val ie = assertFailsWith<SofabException> { Seq.reserveRowList(rows, 2, 2, RCAP) }
+        assertEquals(SofabError.INVALID_MSG, ie.error)
+        assertEquals(0, rows.size, "rejected before the list grows")
+
+        Seq.reserveRowList(rows, 1, NO_COUNT, RCAP)
+        assertEquals(2, rows.size)
+    }
+
+    @Test
+    fun anUnstatedReceiverCapIsAnArgumentErrorAndNotALimit() {
+        // §6.2.1 requires the caller to state the cap and forbids reading an
+        // omitted one as unlimited, so a negative rcap still admits no row. But it
+        // is NOT LIMIT_EXCEEDED: that category means "raise my limit, or the
+        // sender must send less" and so presupposes a limit somebody set.
+        // Reporting an absent cap as one names a receiver policy the deployment
+        // never configured. The mistake is in the CALL — §6.3's InvalidArgument.
+        for (rcap in listOf(-1, Int.MIN_VALUE)) {
+            val rows = mutableListOf<IntArray>()
+            val e = assertFailsWith<SofabException> { Seq.reserveRowInts(rows, 0, 1, NO_COUNT, rcap) }
+            assertEquals(SofabError.ARGUMENT, e.error)
+            assertEquals(0, rows.size, "fail-closed: the list is not grown either")
+
+            val lists = mutableListOf<MutableList<String>>()
+            val le = assertFailsWith<SofabException> { Seq.reserveRowList(lists, 0, NO_COUNT, rcap) }
+            assertEquals(SofabError.ARGUMENT, le.error)
+            assertEquals(0, lists.size)
+        }
+    }
+
+    @Test
+    fun aCapOfZeroIsAStatedLimitAndNotAnAbsentOne() {
+        // The line between the two categories is at 0, not below it: a receiver
+        // that configured 0 rows admits none, and that refusal is a real limit to
+        // raise rather than a call that forgot to state one.
+        val rows = mutableListOf<IntArray>()
+        val e = assertFailsWith<SofabException> { Seq.reserveRowInts(rows, 0, 1, NO_COUNT, 0) }
+        assertEquals(SofabError.LIMIT_EXCEEDED, e.error)
+        assertEquals(0, rows.size)
+    }
+
+    @Test
+    fun aSchemaCountedArrayIsUnaffectedByAnUnstatedReceiverCap() {
+        // §6.2.1: where the schema counts the array the receiver cap is not in
+        // play at all, so the absent-cap check must not leak into that branch and
+        // turn a perfectly good row placement into an argument error.
+        val rows = mutableListOf<IntArray>()
+        assertEquals(1, Seq.reserveRowInts(rows, 3, 1, 4, -1).size)
+        assertEquals(4, rows.size)
+    }
+
     @Test
     fun anIdGapFillsWithEmptyRowsRatherThanShifting() {
         // MESSAGE_SPEC §5.1: an element's id is its index. Rows 0 and 1 were
         // omitted because they are empty, so row 2 has to land at index 2 — not at
         // index 0 with everything after it shifted down.
         val rows = mutableListOf<IntArray>()
-        val row = Seq.reserveRowInts(rows, 2, 3)
+        val row = Seq.reserveRowInts(rows, 2, 3, NO_COUNT, RCAP)
         assertEquals(3, rows.size)
         assertSame(Seq.EMPTY_INTS, rows[0])
         assertSame(Seq.EMPTY_INTS, rows[1])
@@ -153,8 +264,8 @@ class SeqTest {
         // §7.4: an array wrapper is the array's value, so a second occurrence of the
         // same element id overwrites the first — the outer array does not grow.
         val rows = mutableListOf<IntArray>()
-        Seq.reserveRowInts(rows, 0, 4)[0] = 7
-        val second = Seq.reserveRowInts(rows, 0, 1)
+        Seq.reserveRowInts(rows, 0, 4, NO_COUNT, RCAP)[0] = 7
+        val second = Seq.reserveRowInts(rows, 0, 1, NO_COUNT, RCAP)
         assertEquals(1, rows.size)
         assertSame(second, rows[0])
         assertEquals(1, second.size)
@@ -164,7 +275,7 @@ class SeqTest {
     @Test
     fun rowsArrivingInOrderJustAppend() {
         val rows = mutableListOf<LongArray>()
-        for (id in 0 until 3) Seq.reserveRowLongs(rows, id, id + 1)[id] = id.toLong()
+        for (id in 0 until 3) Seq.reserveRowLongs(rows, id, id + 1, NO_COUNT, RCAP)[id] = id.toLong()
         assertEquals(3, rows.size)
         assertContentEquals(intArrayOf(1, 2, 3), IntArray(3) { rows[it].size })
         assertEquals(2L, rows[2][2])
@@ -176,65 +287,65 @@ class SeqTest {
         // row), then reserve row 1 again (which replaces it in place rather than
         // appending a second one).
         val bytes = mutableListOf<ByteArray>()
-        assertEquals(2, Seq.reserveRowBytes(bytes, 1, 2).size)
+        assertEquals(2, Seq.reserveRowBytes(bytes, 1, 2, NO_COUNT, RCAP).size)
         assertSame(Seq.EMPTY_BYTES, bytes[0])
-        assertEquals(3, Seq.reserveRowBytes(bytes, 1, 3).size)
+        assertEquals(3, Seq.reserveRowBytes(bytes, 1, 3, NO_COUNT, RCAP).size)
         assertEquals(2, bytes.size)
 
         val shorts = mutableListOf<ShortArray>()
-        assertEquals(2, Seq.reserveRowShorts(shorts, 1, 2).size)
+        assertEquals(2, Seq.reserveRowShorts(shorts, 1, 2, NO_COUNT, RCAP).size)
         assertSame(Seq.EMPTY_SHORTS, shorts[0])
-        assertEquals(3, Seq.reserveRowShorts(shorts, 1, 3).size)
+        assertEquals(3, Seq.reserveRowShorts(shorts, 1, 3, NO_COUNT, RCAP).size)
         assertEquals(2, shorts.size)
 
         val longs = mutableListOf<LongArray>()
-        assertEquals(2, Seq.reserveRowLongs(longs, 1, 2).size)
+        assertEquals(2, Seq.reserveRowLongs(longs, 1, 2, NO_COUNT, RCAP).size)
         assertSame(Seq.EMPTY_LONGS, longs[0])
-        assertEquals(3, Seq.reserveRowLongs(longs, 1, 3).size)
+        assertEquals(3, Seq.reserveRowLongs(longs, 1, 3, NO_COUNT, RCAP).size)
         assertEquals(2, longs.size)
 
         val floats = mutableListOf<FloatArray>()
-        assertEquals(2, Seq.reserveRowFloats(floats, 1, 2).size)
+        assertEquals(2, Seq.reserveRowFloats(floats, 1, 2, NO_COUNT, RCAP).size)
         assertSame(Seq.EMPTY_FLOATS, floats[0])
-        assertEquals(3, Seq.reserveRowFloats(floats, 1, 3).size)
+        assertEquals(3, Seq.reserveRowFloats(floats, 1, 3, NO_COUNT, RCAP).size)
         assertEquals(2, floats.size)
 
         val doubles = mutableListOf<DoubleArray>()
-        assertEquals(2, Seq.reserveRowDoubles(doubles, 1, 2).size)
+        assertEquals(2, Seq.reserveRowDoubles(doubles, 1, 2, NO_COUNT, RCAP).size)
         assertSame(Seq.EMPTY_DOUBLES, doubles[0])
-        assertEquals(3, Seq.reserveRowDoubles(doubles, 1, 3).size)
+        assertEquals(3, Seq.reserveRowDoubles(doubles, 1, 3, NO_COUNT, RCAP).size)
         assertEquals(2, doubles.size)
 
         val booleans = mutableListOf<BooleanArray>()
-        assertEquals(2, Seq.reserveRowBooleans(booleans, 1, 2).size)
+        assertEquals(2, Seq.reserveRowBooleans(booleans, 1, 2, NO_COUNT, RCAP).size)
         assertSame(Seq.EMPTY_BOOLEANS, booleans[0])
-        assertEquals(3, Seq.reserveRowBooleans(booleans, 1, 3).size)
+        assertEquals(3, Seq.reserveRowBooleans(booleans, 1, 3, NO_COUNT, RCAP).size)
         assertEquals(2, booleans.size)
 
         // The unsigned widths are value classes over the signed ones; comparing the
         // gap fill by identity would compare two boxes, so compare its length.
         val ubytes = mutableListOf<UByteArray>()
-        assertEquals(2, Seq.reserveRowUBytes(ubytes, 1, 2).size)
+        assertEquals(2, Seq.reserveRowUBytes(ubytes, 1, 2, NO_COUNT, RCAP).size)
         assertEquals(0, ubytes[0].size)
-        assertEquals(3, Seq.reserveRowUBytes(ubytes, 1, 3).size)
+        assertEquals(3, Seq.reserveRowUBytes(ubytes, 1, 3, NO_COUNT, RCAP).size)
         assertEquals(2, ubytes.size)
 
         val ushorts = mutableListOf<UShortArray>()
-        assertEquals(2, Seq.reserveRowUShorts(ushorts, 1, 2).size)
+        assertEquals(2, Seq.reserveRowUShorts(ushorts, 1, 2, NO_COUNT, RCAP).size)
         assertEquals(0, ushorts[0].size)
-        assertEquals(3, Seq.reserveRowUShorts(ushorts, 1, 3).size)
+        assertEquals(3, Seq.reserveRowUShorts(ushorts, 1, 3, NO_COUNT, RCAP).size)
         assertEquals(2, ushorts.size)
 
         val uints = mutableListOf<UIntArray>()
-        assertEquals(2, Seq.reserveRowUInts(uints, 1, 2).size)
+        assertEquals(2, Seq.reserveRowUInts(uints, 1, 2, NO_COUNT, RCAP).size)
         assertEquals(0, uints[0].size)
-        assertEquals(3, Seq.reserveRowUInts(uints, 1, 3).size)
+        assertEquals(3, Seq.reserveRowUInts(uints, 1, 3, NO_COUNT, RCAP).size)
         assertEquals(2, uints.size)
 
         val ulongs = mutableListOf<ULongArray>()
-        assertEquals(2, Seq.reserveRowULongs(ulongs, 1, 2).size)
+        assertEquals(2, Seq.reserveRowULongs(ulongs, 1, 2, NO_COUNT, RCAP).size)
         assertEquals(0, ulongs[0].size)
-        assertEquals(3, Seq.reserveRowULongs(ulongs, 1, 3).size)
+        assertEquals(3, Seq.reserveRowULongs(ulongs, 1, 3, NO_COUNT, RCAP).size)
         assertEquals(2, ulongs.size)
     }
 
@@ -243,10 +354,10 @@ class SeqTest {
         // Decoding N rows must allocate N lists, not 2N: an already-present row is
         // cleared, so the object stays and only its value is replaced.
         val rows = mutableListOf<MutableList<String>>()
-        Seq.reserveRowList(rows, 1)
+        Seq.reserveRowList(rows, 1, NO_COUNT, RCAP)
         rows[1].add("a")
         val held = rows[1]
-        Seq.reserveRowList(rows, 1)
+        Seq.reserveRowList(rows, 1, NO_COUNT, RCAP)
         assertEquals(2, rows.size)
         assertSame(held, rows[1])
         assertTrue(held.isEmpty())
@@ -255,7 +366,7 @@ class SeqTest {
     @Test
     fun aWrapperRowGapFillsWithEmptyLists() {
         val rows = mutableListOf<MutableList<String>>()
-        Seq.reserveRowList(rows, 2)
+        Seq.reserveRowList(rows, 2, NO_COUNT, RCAP)
         assertEquals(3, rows.size)
         assertTrue(rows.all { it.isEmpty() })
         // The gap fills are separate lists, not one shared instance: filling row 2

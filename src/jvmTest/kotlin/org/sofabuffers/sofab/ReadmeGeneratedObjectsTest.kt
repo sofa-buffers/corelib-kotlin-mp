@@ -70,9 +70,22 @@ class ReadmeGeneratedObjectsTest {
             chunkLength: Int,
         ) {
             if (id != 1) return
-            nameBytes.string(total, offset, data, chunkOffset, chunkLength)?.let {
-                value.name = it
-            }
+            nameBytes.string(total, offset, data, chunkOffset, chunkLength, NAME_MAXLEN, MAX_DYN_STRING_LEN)
+                ?.let { value.name = it }
+        }
+
+        companion object {
+            /**
+             * The two bounds generated code states at every payload call
+             * (CORELIB_PLAN §6.2.1): the field's schema `maxlen`, and the
+             * deployment's configured `max_dyn_string_len` for the case where the
+             * schema declares none. `name` here declares one, so the second is
+             * inert for this field — it is passed, and cannot apply.
+             */
+            const val NAME_MAXLEN: Int = 32
+
+            /** @see NAME_MAXLEN */
+            const val MAX_DYN_STRING_LEN: Int = 256 * 1024
         }
     }
 
