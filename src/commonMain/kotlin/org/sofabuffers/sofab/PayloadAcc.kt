@@ -60,7 +60,10 @@ package org.sofabuffers.sofab
  * leaves unbounded is governed by the receiver cap and its violation is the
  * `LIMIT_EXCEEDED` policy category (§6.2.1, §6.3). They are never both in play,
  * so a receiver cap can never be applied to a schema-bounded field, and a
- * schema-unbounded field can never be decoded uncapped.
+ * schema-unbounded field can never be decoded uncapped: a cap that was never
+ * stated — a negative `rmaxlen` — decodes nothing either, and is reported as
+ * `ARGUMENT`, the mistake being in the call rather than in a receiver policy
+ * nobody configured (§6.3).
  *
  * **No re-arming step on the decode side.** Every payload's first chunk is
  * reported at offset 0, and that is where the buffer is emptied — so an
@@ -155,12 +158,14 @@ public class PayloadAcc : FlushSink {
      * @param maxlen the field's schema `maxlen`, or a negative number where the
      *     schema declares none
      * @param rmaxlen the receiver's configured `max_dyn_string_len`, applied only
-     *     where [maxlen] is negative
+     *     where [maxlen] is negative; a negative [rmaxlen] states no cap at all
+     *     and decodes nothing
      * @return the completed string, or null while the payload is incomplete
      * @throws SofabException [SofabError.INVALID_MSG] when [total] exceeds a
      *     declared [maxlen], or when the completed payload is not valid UTF-8;
-     *     [SofabError.LIMIT_EXCEEDED] when a schema-unbounded [total] exceeds
-     *     [rmaxlen]
+     *     [SofabError.LIMIT_EXCEEDED] when a schema-unbounded [total] exceeds a
+     *     stated [rmaxlen]; [SofabError.ARGUMENT] when a schema-unbounded field
+     *     was handed no cap at all ([rmaxlen] negative)
      */
     public fun string(
         total: Int,
@@ -171,7 +176,7 @@ public class PayloadAcc : FlushSink {
         maxlen: Int,
         rmaxlen: Int,
     ): String? {
-        bound(total, maxlen, rmaxlen, "string length")
+        bound(total, maxlen, rmaxlen, "string length", "max_dyn_string_len")
         if (offset == 0 && chunkLength >= total) return Utf8.decode(data, chunkOffset, total)
         if (!append(total, offset, data, chunkOffset, chunkLength)) return null
         size = 0
@@ -193,11 +198,13 @@ public class PayloadAcc : FlushSink {
      * @param maxlen the field's schema `maxlen`, or a negative number where the
      *     schema declares none
      * @param rmaxlen the receiver's configured `max_dyn_blob_len`, applied only
-     *     where [maxlen] is negative
+     *     where [maxlen] is negative; a negative [rmaxlen] states no cap at all
+     *     and decodes nothing
      * @return the completed payload, or null while it is incomplete
      * @throws SofabException [SofabError.INVALID_MSG] when [total] exceeds a
      *     declared [maxlen]; [SofabError.LIMIT_EXCEEDED] when a schema-unbounded
-     *     [total] exceeds [rmaxlen]
+     *     [total] exceeds a stated [rmaxlen]; [SofabError.ARGUMENT] when a
+     *     schema-unbounded field was handed no cap at all ([rmaxlen] negative)
      */
     public fun blob(
         total: Int,
@@ -208,7 +215,7 @@ public class PayloadAcc : FlushSink {
         maxlen: Int,
         rmaxlen: Int,
     ): ByteArray? {
-        bound(total, maxlen, rmaxlen, "blob length")
+        bound(total, maxlen, rmaxlen, "blob length", "max_dyn_blob_len")
         if (offset == 0 && chunkLength >= total) {
             return data.copyOfRange(chunkOffset, chunkOffset + total)
         }
@@ -230,20 +237,47 @@ public class PayloadAcc : FlushSink {
      * a deployment's capacity decision, the bytes are well formed, the same
      * payload decodes for a receiver configured more loosely, and the verdict is
      * therefore the [SofabError.LIMIT_EXCEEDED] policy category rather than
-     * [SofabError.INVALID_MSG] (§6.3).
+     * [SofabError.INVALID_MSG] (§6.3) — or, where the call stated no cap at all,
+     * [SofabError.ARGUMENT]; see [refuse].
      *
      * Neither number is this class's. Both arrive per call, are used for this one
      * comparison and are not retained; nothing here defaults, invents or clamps to
      * a limit, and a payload is never truncated to fit one.
      */
-    private fun bound(total: Int, maxlen: Int, rmax: Int, noun: String) {
+    private fun bound(total: Int, maxlen: Int, rmax: Int, noun: String, which: String) {
         if (maxlen >= 0) {
             if (total > maxlen) {
                 throw SofabException(SofabError.INVALID_MSG, "$noun $total above declared maxlen $maxlen")
             }
         } else if (total > rmax) {
-            throw SofabException(SofabError.LIMIT_EXCEEDED, "$noun $total above configured limit $rmax")
+            refuse(total, rmax, noun, which)
         }
+    }
+
+    /**
+     * Name the refusal a schema-unbounded [total] has earned: a stated cap it
+     * overruns, or a cap that was never stated at all (CORELIB_PLAN §6.3).
+     *
+     * Out of line, so the check itself stays a single compare on a call generated
+     * code already makes and the message building never sits on the hot path.
+     *
+     * The two categories say different things and are not interchangeable.
+     * [SofabError.LIMIT_EXCEEDED] means *"raise my limit, or the sender must send
+     * less"*: a receiver cap was configured, these bytes are well formed, and the
+     * same payload decodes for a receiver configured more loosely. A negative
+     * [rmax] is not a small limit and not an unlimited one — it is the **absence**
+     * of the number §6.2.1 requires the caller to supply, so the mistake is in the
+     * **call** and the category is [SofabError.ARGUMENT] (§6.3's
+     * `InvalidArgument`). Reporting that as `LIMIT_EXCEEDED` would name a receiver
+     * policy the deployment never set and promise a limit to raise that does not
+     * exist. The refusal itself is the same either way: §6.2.1 forbids reading an
+     * omitted cap as *unlimited*, so an unstated cap still decodes nothing.
+     */
+    private fun refuse(total: Int, rmax: Int, noun: String, which: String): Nothing {
+        if (rmax < 0) {
+            throw SofabException(SofabError.ARGUMENT, "$which not stated (cap $rmax) for $noun $total")
+        }
+        throw SofabException(SofabError.LIMIT_EXCEEDED, "$noun $total above configured limit $rmax")
     }
 
     /**

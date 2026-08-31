@@ -240,7 +240,9 @@ via `Utf8.decode`. The support layer below **takes two of those numbers as
 arguments** and compares against them where it already stands — at the payload
 length and at the row index, before either allocates. It holds none of its own:
 nothing here defaults a limit, invents one it was not given, reads an omitted
-argument as unlimited, or clamps to one (CORELIB_PLAN §6.2.1).
+argument as unlimited, or clamps to one (CORELIB_PLAN §6.2.1). A call that states
+no cap for a schema-unbounded field decodes nothing either, and says so as
+`ARGUMENT` — a limit nobody set is not a limit to raise (§6.3).
 
 ## Generated-code support layer
 

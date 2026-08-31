@@ -204,6 +204,48 @@ class SeqTest {
     }
 
     @Test
+    fun anUnstatedReceiverCapIsAnArgumentErrorAndNotALimit() {
+        // §6.2.1 requires the caller to state the cap and forbids reading an
+        // omitted one as unlimited, so a negative rcap still admits no row. But it
+        // is NOT LIMIT_EXCEEDED: that category means "raise my limit, or the
+        // sender must send less" and so presupposes a limit somebody set.
+        // Reporting an absent cap as one names a receiver policy the deployment
+        // never configured. The mistake is in the CALL — §6.3's InvalidArgument.
+        for (rcap in listOf(-1, Int.MIN_VALUE)) {
+            val rows = mutableListOf<IntArray>()
+            val e = assertFailsWith<SofabException> { Seq.reserveRowInts(rows, 0, 1, NO_COUNT, rcap) }
+            assertEquals(SofabError.ARGUMENT, e.error)
+            assertEquals(0, rows.size, "fail-closed: the list is not grown either")
+
+            val lists = mutableListOf<MutableList<String>>()
+            val le = assertFailsWith<SofabException> { Seq.reserveRowList(lists, 0, NO_COUNT, rcap) }
+            assertEquals(SofabError.ARGUMENT, le.error)
+            assertEquals(0, lists.size)
+        }
+    }
+
+    @Test
+    fun aCapOfZeroIsAStatedLimitAndNotAnAbsentOne() {
+        // The line between the two categories is at 0, not below it: a receiver
+        // that configured 0 rows admits none, and that refusal is a real limit to
+        // raise rather than a call that forgot to state one.
+        val rows = mutableListOf<IntArray>()
+        val e = assertFailsWith<SofabException> { Seq.reserveRowInts(rows, 0, 1, NO_COUNT, 0) }
+        assertEquals(SofabError.LIMIT_EXCEEDED, e.error)
+        assertEquals(0, rows.size)
+    }
+
+    @Test
+    fun aSchemaCountedArrayIsUnaffectedByAnUnstatedReceiverCap() {
+        // §6.2.1: where the schema counts the array the receiver cap is not in
+        // play at all, so the absent-cap check must not leak into that branch and
+        // turn a perfectly good row placement into an argument error.
+        val rows = mutableListOf<IntArray>()
+        assertEquals(1, Seq.reserveRowInts(rows, 3, 1, 4, -1).size)
+        assertEquals(4, rows.size)
+    }
+
+    @Test
     fun anIdGapFillsWithEmptyRowsRatherThanShifting() {
         // MESSAGE_SPEC §5.1: an element's id is its index. Rows 0 and 1 were
         // omitted because they are empty, so row 2 has to land at index 2 — not at

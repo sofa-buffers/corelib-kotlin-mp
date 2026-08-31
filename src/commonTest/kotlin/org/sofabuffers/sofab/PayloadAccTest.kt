@@ -240,6 +240,60 @@ class PayloadAccTest {
         assertEquals(0, acc.size)
     }
 
+    @Test
+    fun anUnstatedReceiverCapIsAnArgumentErrorAndNotALimit() {
+        // §6.2.1 requires the caller to state the cap and forbids reading an
+        // omitted one as unlimited, so a negative rmaxlen still decodes nothing.
+        // But it is NOT LIMIT_EXCEEDED: that category means "raise my limit, or
+        // the sender must send less" and so presupposes a limit somebody set.
+        // Reporting an absent cap as one names a receiver policy the deployment
+        // never configured and promises a limit to raise that does not exist. The
+        // mistake is in the CALL, which is §6.3's InvalidArgument.
+        for (rmax in listOf(-1, Int.MIN_VALUE)) {
+            val acc = PayloadAcc()
+            val e = assertFailsWith<SofabException> { acc.string(1, 0, payload, 0, 1, NO_MAXLEN, rmax) }
+            assertEquals(SofabError.ARGUMENT, e.error)
+            assertEquals(0, acc.size, "fail-closed: nothing is buffered either")
+
+            val be = assertFailsWith<SofabException> { acc.blob(1, 0, payload, 0, 1, NO_MAXLEN, rmax) }
+            assertEquals(SofabError.ARGUMENT, be.error)
+            assertEquals(0, acc.size)
+        }
+    }
+
+    @Test
+    fun anUnstatedCapRefusesEvenAnEmptyPayload() {
+        // The one payload a cap of 0 admits is still refused when no cap was
+        // stated at all — the negative number is the absence of a limit, never the
+        // loosest one.
+        val acc = PayloadAcc()
+        val e = assertFailsWith<SofabException> { acc.string(0, 0, payload, 0, 0, NO_MAXLEN, -1) }
+        assertEquals(SofabError.ARGUMENT, e.error)
+        val be = assertFailsWith<SofabException> { acc.blob(0, 0, payload, 0, 0, NO_MAXLEN, -1) }
+        assertEquals(SofabError.ARGUMENT, be.error)
+    }
+
+    @Test
+    fun aCapOfZeroIsAStatedLimitAndNotAnAbsentOne() {
+        // The line between the two categories is at 0, not below it: a receiver
+        // that configured 0 admits the empty payload and refuses every other one,
+        // and that refusal is a real limit to raise.
+        assertEquals("", PayloadAcc().string(0, 0, payload, 0, 0, NO_MAXLEN, 0))
+        assertContentEquals(ByteArray(0), PayloadAcc().blob(0, 0, payload, 0, 0, NO_MAXLEN, 0))
+        val e = assertFailsWith<SofabException> { PayloadAcc().string(1, 0, payload, 0, 1, NO_MAXLEN, 0) }
+        assertEquals(SofabError.LIMIT_EXCEEDED, e.error)
+    }
+
+    @Test
+    fun aSchemaBoundedFieldIsUnaffectedByAnUnstatedReceiverCap() {
+        // §6.2.1: where the schema bounds the field the receiver cap is not in
+        // play at all, so the absent-cap check must not leak into that branch and
+        // turn a perfectly good decode into an argument error.
+        val eight = ByteArray(8) { 0x63 }
+        assertEquals("cccccccc", PayloadAcc().string(8, 0, eight, 0, 8, 16, -1))
+        assertContentEquals(eight, PayloadAcc().blob(8, 0, eight, 0, 8, 16, -1))
+    }
+
     // -----------------------------------------------------------------------
     // Encode: draining a flush sink
     // -----------------------------------------------------------------------

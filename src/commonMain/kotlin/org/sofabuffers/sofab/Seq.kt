@@ -54,7 +54,10 @@ package org.sofabuffers.sofab
  * malformed input (`INVALID_MSG`, MESSAGE_SPEC §7.1) and forbids the receiver cap
  * from touching the field at all, while an array the schema leaves uncounted is
  * bounded by the receiver cap and answers the `LIMIT_EXCEEDED` policy category
- * (§6.3). Nothing here holds, defaults to or clamps to a limit of its own.
+ * (§6.3). Nothing here holds, defaults to or clamps to a limit of its own — and a
+ * call that states no cap at all admits no row either, reported as `ARGUMENT`,
+ * the mistake being in the call rather than in a receiver policy nobody
+ * configured.
  */
 public object Seq {
 
@@ -137,11 +140,13 @@ public object Seq {
      * @param cap the outer array's schema `count`, or a negative number where the
      *     schema declares none
      * @param rcap the receiver's configured `max_dyn_array_count`, applied only
-     *     where [cap] is negative
+     *     where [cap] is negative; a negative [rcap] states no cap at all and
+     *     admits no row
      * @return the new row, now at index [id]
      * @throws SofabException [SofabError.INVALID_MSG] when [id] reaches a declared
      *     [cap]; [SofabError.LIMIT_EXCEEDED] when a schema-uncounted [id] reaches
-     *     [rcap]
+     *     a stated [rcap]; [SofabError.ARGUMENT] when a schema-uncounted array was
+     *     handed no cap at all ([rcap] negative)
      */
     public fun reserveRowBytes(rows: MutableList<ByteArray>, id: Int, n: Int, cap: Int, rcap: Int): ByteArray {
         boundIndex(id, cap, rcap)
@@ -353,7 +358,8 @@ public object Seq {
      * @param T row element type
      * @throws SofabException [SofabError.INVALID_MSG] when [id] reaches a declared
      *     [cap]; [SofabError.LIMIT_EXCEEDED] when a schema-uncounted [id] reaches
-     *     [rcap]
+     *     a stated [rcap]; [SofabError.ARGUMENT] when a schema-uncounted array was
+     *     handed no cap at all ([rcap] negative)
      */
     public fun <T> reserveRowList(rows: MutableList<MutableList<T>>, id: Int, cap: Int, rcap: Int) {
         boundIndex(id, cap, rcap)
@@ -379,7 +385,8 @@ public object Seq {
      * design (§5.1), so its index is its length and [rcap] — the deployment's
      * capacity decision — is what bounds it; the bytes are well formed, the same
      * element decodes for a receiver configured more loosely, and the verdict is
-     * the [SofabError.LIMIT_EXCEEDED] policy category (§6.3).
+     * the [SofabError.LIMIT_EXCEEDED] policy category (§6.3) — or, where the call
+     * stated no cap at all, [SofabError.ARGUMENT]; see [refuse].
      *
      * Neither number is this object's. Both arrive per call, are used for this one
      * comparison and are not retained; nothing here defaults, invents or clamps to
@@ -392,8 +399,34 @@ public object Seq {
                 throw SofabException(SofabError.INVALID_MSG, "row index $id above declared count $cap")
             }
         } else if (id >= rcap) {
-            throw SofabException(SofabError.LIMIT_EXCEEDED, "row index $id above configured limit $rcap")
+            refuse(id, rcap)
         }
+    }
+
+    /**
+     * Name the refusal a schema-uncounted [id] has earned: a stated cap it reaches,
+     * or a cap that was never stated at all (CORELIB_PLAN §6.3).
+     *
+     * Out of line, so the check itself stays a single compare on a call generated
+     * code already makes and the message building never sits on the hot path.
+     *
+     * The two categories say different things and are not interchangeable.
+     * [SofabError.LIMIT_EXCEEDED] means *"raise my limit, or the sender must send
+     * less"*: a receiver cap was configured, these bytes are well formed, and the
+     * same element decodes for a receiver configured more loosely. A negative
+     * [rcap] is not a small limit and not an unlimited one — it is the **absence**
+     * of the number §6.2.1 requires the caller to supply, so the mistake is in the
+     * **call** and the category is [SofabError.ARGUMENT] (§6.3's
+     * `InvalidArgument`). Reporting that as `LIMIT_EXCEEDED` would name a receiver
+     * policy the deployment never set and promise a limit to raise that does not
+     * exist. The refusal itself is the same either way: §6.2.1 forbids reading an
+     * omitted cap as *unlimited*, so an unstated cap still admits no row.
+     */
+    private fun refuse(id: Int, rcap: Int): Nothing {
+        if (rcap < 0) {
+            throw SofabException(SofabError.ARGUMENT, "max_dyn_array_count not stated (cap $rcap) for row index $id")
+        }
+        throw SofabException(SofabError.LIMIT_EXCEEDED, "row index $id above configured limit $rcap")
     }
 
     // -----------------------------------------------------------------------
