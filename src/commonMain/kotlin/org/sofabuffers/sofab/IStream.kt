@@ -183,8 +183,11 @@ public class IStream {
     private var invalid = false
 
     /**
-     * Latched receiver-limit stop: the [Visitor] rejected a schema-**unbounded**
-     * count or length against a configured cap (CORELIB_PLAN §6.2.1). §6.3 calls
+     * Latched receiver-limit stop: a schema-**unbounded** count, length or element
+     * index was rejected against a configured cap (CORELIB_PLAN §6.2.1) — by the
+     * [Visitor] itself, or by the [PayloadAcc] / [Seq] call it made with the cap as
+     * an argument, both of which run inside a callback of the decode this latch
+     * belongs to. §6.3 calls
      * that "a **terminal**, receiver-local **policy** rejection" — the decode stops
      * where it stopped and this decoder will not finish the message — so it latches
      * like [invalid] does, and for the same reason: the parse position it held is

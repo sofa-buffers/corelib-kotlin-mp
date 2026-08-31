@@ -32,7 +32,10 @@ package org.sofabuffers.sofab
  *
  * ```
  * override fun string(id: Int, total: Int, offset: Int, data: ByteArray, co: Int, cl: Int) {
- *     val s = acc.string(total, offset, data, co, cl) ?: return   // more chunks to come
+ *     // maxlen = the schema's, or -1 where it declares none; MAX_DYN_STRING_LEN
+ *     // = this deployment's cap, applied only where maxlen is -1.
+ *     val s = acc.string(total, offset, data, co, cl, maxlen, MAX_DYN_STRING_LEN)
+ *         ?: return                                              // more chunks to come
  *     ...                                                        // route s to its field
  * }
  * ```
@@ -41,12 +44,23 @@ package org.sofabuffers.sofab
  * one chunk carrying the entire field — is answered straight out of the caller's
  * input array, so an accumulator that is never needed never allocates one byte.
  *
- * **`total` is not an allocation.** The announced length is the wire's claim,
- * bounded by nothing this class knows about, so the buffer grows by doubling
- * against bytes that have actually arrived. A caller with a schema `maxlen` or a
- * receiver limit rejects an oversized `total` before the first chunk reaches here
- * (MESSAGE_SPEC §7.1); a caller without one still cannot be made to allocate more
- * than the peer actually sent.
+ * **`total` is not an allocation.** The announced length is the wire's claim, so
+ * the buffer grows by doubling against bytes that have actually arrived — an
+ * oversized `total` never sizes anything by itself.
+ *
+ * **The two bounds travel as arguments.** [string] and [blob] take the field's
+ * schema `maxlen` and the deployment's receiver cap and reject an oversized
+ * `total` at the length header, before a byte is buffered — the site
+ * CORELIB_PLAN §6.2.1 requires, reached through a call generated code already
+ * makes. Both numbers are the **caller's**: they are supplied per call, used for
+ * that one comparison and never retained, and this class holds, defaults and
+ * clamps to none of its own. Which of the two applies is decided by the schema
+ * and not by this class: a field the schema bounds is governed by its `maxlen`
+ * and its violation is `INVALID_MSG` (MESSAGE_SPEC §7.1), a field the schema
+ * leaves unbounded is governed by the receiver cap and its violation is the
+ * `LIMIT_EXCEEDED` policy category (§6.2.1, §6.3). They are never both in play,
+ * so a receiver cap can never be applied to a schema-bounded field, and a
+ * schema-unbounded field can never be decoded uncapped.
  *
  * **No re-arming step on the decode side.** Every payload's first chunk is
  * reported at offset 0, and that is where the buffer is emptied — so an
@@ -138,11 +152,26 @@ public class PayloadAcc : FlushSink {
      * @param data backing array containing the chunk
      * @param chunkOffset start of the chunk within [data]
      * @param chunkLength number of bytes in the chunk
+     * @param maxlen the field's schema `maxlen`, or a negative number where the
+     *     schema declares none
+     * @param rmaxlen the receiver's configured `max_dyn_string_len`, applied only
+     *     where [maxlen] is negative
      * @return the completed string, or null while the payload is incomplete
-     * @throws SofabException [SofabError.INVALID_MSG] when the completed payload
-     *     is not valid UTF-8
+     * @throws SofabException [SofabError.INVALID_MSG] when [total] exceeds a
+     *     declared [maxlen], or when the completed payload is not valid UTF-8;
+     *     [SofabError.LIMIT_EXCEEDED] when a schema-unbounded [total] exceeds
+     *     [rmaxlen]
      */
-    public fun string(total: Int, offset: Int, data: ByteArray, chunkOffset: Int, chunkLength: Int): String? {
+    public fun string(
+        total: Int,
+        offset: Int,
+        data: ByteArray,
+        chunkOffset: Int,
+        chunkLength: Int,
+        maxlen: Int,
+        rmaxlen: Int,
+    ): String? {
+        bound(total, maxlen, rmaxlen, "string length")
         if (offset == 0 && chunkLength >= total) return Utf8.decode(data, chunkOffset, total)
         if (!append(total, offset, data, chunkOffset, chunkLength)) return null
         size = 0
@@ -161,15 +190,60 @@ public class PayloadAcc : FlushSink {
      * @param data backing array containing the chunk
      * @param chunkOffset start of the chunk within [data]
      * @param chunkLength number of bytes in the chunk
+     * @param maxlen the field's schema `maxlen`, or a negative number where the
+     *     schema declares none
+     * @param rmaxlen the receiver's configured `max_dyn_blob_len`, applied only
+     *     where [maxlen] is negative
      * @return the completed payload, or null while it is incomplete
+     * @throws SofabException [SofabError.INVALID_MSG] when [total] exceeds a
+     *     declared [maxlen]; [SofabError.LIMIT_EXCEEDED] when a schema-unbounded
+     *     [total] exceeds [rmaxlen]
      */
-    public fun blob(total: Int, offset: Int, data: ByteArray, chunkOffset: Int, chunkLength: Int): ByteArray? {
+    public fun blob(
+        total: Int,
+        offset: Int,
+        data: ByteArray,
+        chunkOffset: Int,
+        chunkLength: Int,
+        maxlen: Int,
+        rmaxlen: Int,
+    ): ByteArray? {
+        bound(total, maxlen, rmaxlen, "blob length")
         if (offset == 0 && chunkLength >= total) {
             return data.copyOfRange(chunkOffset, chunkOffset + total)
         }
         if (!append(total, offset, data, chunkOffset, chunkLength)) return null
         size = 0
         return buf.copyOf(total)
+    }
+
+    /**
+     * Reject an announced [total] the caller may not accept, at the length header
+     * and before a byte is buffered (CORELIB_PLAN §6.2.1).
+     *
+     * Exactly one of the two numbers applies, and the schema picks which. A
+     * declared [maxlen] is a statement about **validity**: a longer payload
+     * contradicts the schema both peers agreed on, so it is malformed input
+     * (MESSAGE_SPEC §7.1) and the receiver cap must not be applied to it at all.
+     * Where the schema declares nothing — [maxlen] negative — the field is
+     * unbounded by the *message* and bounded by the *receiver* instead: [rmax] is
+     * a deployment's capacity decision, the bytes are well formed, the same
+     * payload decodes for a receiver configured more loosely, and the verdict is
+     * therefore the [SofabError.LIMIT_EXCEEDED] policy category rather than
+     * [SofabError.INVALID_MSG] (§6.3).
+     *
+     * Neither number is this class's. Both arrive per call, are used for this one
+     * comparison and are not retained; nothing here defaults, invents or clamps to
+     * a limit, and a payload is never truncated to fit one.
+     */
+    private fun bound(total: Int, maxlen: Int, rmax: Int, noun: String) {
+        if (maxlen >= 0) {
+            if (total > maxlen) {
+                throw SofabException(SofabError.INVALID_MSG, "$noun $total above declared maxlen $maxlen")
+            }
+        } else if (total > rmax) {
+            throw SofabException(SofabError.LIMIT_EXCEEDED, "$noun $total above configured limit $rmax")
+        }
     }
 
     /**

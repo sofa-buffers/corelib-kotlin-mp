@@ -15,6 +15,18 @@ import kotlin.test.assertTrue
 
 class PayloadAccTest {
 
+    /**
+     * The two numbers every decode call carries (CORELIB_PLAN §6.2.1). This test
+     * class is the caller, so it states them: [NO_MAXLEN] is what generated code
+     * passes for a field whose schema declares no `maxlen`, and [RCAP] is a
+     * receiver cap standing in for the deployment's configured one — bigger than
+     * any payload here, so nothing but the two limit tests ever meets it.
+     */
+    private val NO_MAXLEN = -1
+
+    /** @see NO_MAXLEN */
+    private val RCAP = 1 shl 20
+
     /** One, two, three and four-byte sequences, an embedded NUL and an ASCII tail. */
     private val text = "h\u00E9\u20AC\uD834\uDD1E\u0000!"
     private val payload = text.encodeToByteArray()
@@ -25,15 +37,15 @@ class PayloadAccTest {
      * [at]. The value comes back on exactly one of the two chunks.
      */
     private fun splitString(acc: PayloadAcc, bytes: ByteArray, at: Int): String? {
-        val head = acc.string(bytes.size, 0, bytes, 0, at)
+        val head = acc.string(bytes.size, 0, bytes, 0, at, NO_MAXLEN, RCAP)
         if (head != null) return head
-        return acc.string(bytes.size, at, bytes, at, bytes.size - at)
+        return acc.string(bytes.size, at, bytes, at, bytes.size - at, NO_MAXLEN, RCAP)
     }
 
     private fun splitBlob(acc: PayloadAcc, bytes: ByteArray, at: Int): ByteArray? {
-        val head = acc.blob(bytes.size, 0, bytes, 0, at)
+        val head = acc.blob(bytes.size, 0, bytes, 0, at, NO_MAXLEN, RCAP)
         if (head != null) return head
-        return acc.blob(bytes.size, at, bytes, at, bytes.size - at)
+        return acc.blob(bytes.size, at, bytes, at, bytes.size - at, NO_MAXLEN, RCAP)
     }
 
     // -----------------------------------------------------------------------
@@ -43,9 +55,9 @@ class PayloadAccTest {
     @Test
     fun aPayloadArrivingWholeNeverTouchesTheBuffer() {
         val acc = PayloadAcc()
-        assertEquals(text, acc.string(payload.size, 0, payload, 0, payload.size))
+        assertEquals(text, acc.string(payload.size, 0, payload, 0, payload.size, NO_MAXLEN, RCAP))
         assertEquals(0, acc.size, "an accumulator that is never needed buffers nothing")
-        assertContentEquals(payload, acc.blob(payload.size, 0, payload, 0, payload.size))
+        assertContentEquals(payload, acc.blob(payload.size, 0, payload, 0, payload.size, NO_MAXLEN, RCAP))
         assertEquals(0, acc.size)
     }
 
@@ -78,10 +90,10 @@ class PayloadAccTest {
         // The extreme of the same rule: a payload delivered one byte at a time.
         val acc = PayloadAcc()
         for (i in 0 until payload.size - 1) {
-            assertNull(acc.string(payload.size, i, payload, i, 1), "byte $i completes nothing")
+            assertNull(acc.string(payload.size, i, payload, i, 1, NO_MAXLEN, RCAP), "byte $i completes nothing")
         }
         val last = payload.size - 1
-        assertEquals(text, acc.string(payload.size, last, payload, last, 1))
+        assertEquals(text, acc.string(payload.size, last, payload, last, 1, NO_MAXLEN, RCAP))
     }
 
     @Test
@@ -93,18 +105,18 @@ class PayloadAccTest {
         val framed = ByteArray(payload.size + 40) { 0x7f }
         payload.copyInto(framed, 32)
         val acc = PayloadAcc()
-        assertEquals(text, acc.string(payload.size, 0, framed, 32, payload.size))
-        assertNull(acc.string(payload.size, 0, framed, 32, 3))
-        assertEquals(text, acc.string(payload.size, 3, framed, 35, payload.size - 3))
-        assertContentEquals(payload, acc.blob(payload.size, 0, framed, 32, payload.size))
+        assertEquals(text, acc.string(payload.size, 0, framed, 32, payload.size, NO_MAXLEN, RCAP))
+        assertNull(acc.string(payload.size, 0, framed, 32, 3, NO_MAXLEN, RCAP))
+        assertEquals(text, acc.string(payload.size, 3, framed, 35, payload.size - 3, NO_MAXLEN, RCAP))
+        assertContentEquals(payload, acc.blob(payload.size, 0, framed, 32, payload.size, NO_MAXLEN, RCAP))
     }
 
     @Test
     fun anEmptyPayloadCompletesOnItsOneChunk() {
         // A zero-length string or blob is reported once, with total == 0.
         val acc = PayloadAcc()
-        assertEquals("", acc.string(0, 0, payload, 0, 0))
-        assertContentEquals(ByteArray(0), acc.blob(0, 0, payload, 0, 0))
+        assertEquals("", acc.string(0, 0, payload, 0, 0, NO_MAXLEN, RCAP))
+        assertContentEquals(ByteArray(0), acc.blob(0, 0, payload, 0, 0, NO_MAXLEN, RCAP))
     }
 
     @Test
@@ -123,7 +135,7 @@ class PayloadAccTest {
                 assertEquals(SofabError.INVALID_MSG, e.error)
             }
             // The same bytes as a blob are not text, and stay legal.
-            assertContentEquals(bad, PayloadAcc().blob(bad.size, 0, bad, 0, bad.size))
+            assertContentEquals(bad, PayloadAcc().blob(bad.size, 0, bad, 0, bad.size, NO_MAXLEN, RCAP))
         }
     }
 
@@ -133,10 +145,10 @@ class PayloadAccTest {
         // payload starts at offset 0, and that is where they are dropped — there is
         // no separate re-arming step for a caller to forget.
         val acc = PayloadAcc()
-        assertNull(acc.string(payload.size, 0, payload, 0, 2))
+        assertNull(acc.string(payload.size, 0, payload, 0, 2, NO_MAXLEN, RCAP))
         assertEquals(2, acc.size)
-        assertNull(acc.string(4, 0, byteArrayOf(0x61, 0x62), 0, 2))
-        assertEquals("abcd", acc.string(4, 2, byteArrayOf(0x63, 0x64), 0, 2))
+        assertNull(acc.string(4, 0, byteArrayOf(0x61, 0x62), 0, 2, NO_MAXLEN, RCAP))
+        assertEquals("abcd", acc.string(4, 2, byteArrayOf(0x63, 0x64), 0, 2, NO_MAXLEN, RCAP))
     }
 
     @Test
@@ -145,7 +157,7 @@ class PayloadAccTest {
         // later chunk arriving in the same array must not rewrite a value already
         // handed over.
         val src = byteArrayOf(1, 2, 3, 4)
-        val whole = PayloadAcc().blob(4, 0, src, 0, 4)!!
+        val whole = PayloadAcc().blob(4, 0, src, 0, 4, NO_MAXLEN, RCAP)!!
         val split = splitBlob(PayloadAcc(), src, 2)!!
         src.fill(9)
         assertContentEquals(byteArrayOf(1, 2, 3, 4), whole)
@@ -159,8 +171,73 @@ class PayloadAccTest {
         // chunk lands in an exactly-sized buffer.
         val big = ByteArray(1000) { (it and 0x7f).toByte() }
         val acc = PayloadAcc()
-        assertNull(acc.blob(big.size, 0, big, 0, 1))
-        assertContentEquals(big, acc.blob(big.size, 1, big, 1, big.size - 1))
+        assertNull(acc.blob(big.size, 0, big, 0, 1, NO_MAXLEN, RCAP))
+        assertContentEquals(big, acc.blob(big.size, 1, big, 1, big.size - 1, NO_MAXLEN, RCAP))
+    }
+
+    // -----------------------------------------------------------------------
+    // The two bounds the caller passes in (CORELIB_PLAN §6.2.1)
+    // -----------------------------------------------------------------------
+
+    @Test
+    fun anUnboundedPayloadAboveTheReceiverCapIsLimitExceeded() {
+        // The cap is the CALLER's number, applied at the length header: the
+        // rejection lands on the first chunk, before a byte is buffered, and the
+        // category is the policy one — the same bytes decode for a receiver
+        // configured more loosely, so INVALID_MSG would be wrong (§6.3).
+        for (acc in listOf(PayloadAcc(), PayloadAcc())) {
+            val e = assertFailsWith<SofabException> { acc.string(9, 0, payload, 0, 1, NO_MAXLEN, 8) }
+            assertEquals(SofabError.LIMIT_EXCEEDED, e.error)
+            assertEquals(0, acc.size, "rejected at the header, before anything is buffered")
+        }
+        val acc = PayloadAcc()
+        val e = assertFailsWith<SofabException> { acc.blob(9, 0, payload, 0, 1, NO_MAXLEN, 8) }
+        assertEquals(SofabError.LIMIT_EXCEEDED, e.error)
+        assertEquals(0, acc.size)
+    }
+
+    @Test
+    fun aPayloadAtTheReceiverCapIsAccepted() {
+        // Rejected, never clamped, and the boundary is `>` and not `>=`: a payload
+        // of exactly the configured length is what the configuration allows.
+        val eight = ByteArray(8) { 0x61 }
+        assertEquals("aaaaaaaa", PayloadAcc().string(8, 0, eight, 0, 8, NO_MAXLEN, 8))
+        assertContentEquals(eight, PayloadAcc().blob(8, 0, eight, 0, 8, NO_MAXLEN, 8))
+    }
+
+    @Test
+    fun aDeclaredMaxlenIsMalformedInputAndNotAPolicyRejection() {
+        // A schema `maxlen` is a statement about validity (MESSAGE_SPEC §7.1): a
+        // longer payload contradicts the schema both peers agreed on, so it is
+        // INVALID_MSG and never LIMIT_EXCEEDED, which would promise a limit to
+        // raise.
+        val acc = PayloadAcc()
+        val e = assertFailsWith<SofabException> { acc.string(9, 0, payload, 0, 1, 8, RCAP) }
+        assertEquals(SofabError.INVALID_MSG, e.error)
+        assertEquals(0, acc.size)
+        val eb = assertFailsWith<SofabException> { PayloadAcc().blob(9, 0, payload, 0, 1, 8, RCAP) }
+        assertEquals(SofabError.INVALID_MSG, eb.error)
+    }
+
+    @Test
+    fun theReceiverCapIsNeverAppliedToASchemaBoundedField() {
+        // §6.2.1: the caps govern only fields the schema left unbounded. A payload
+        // inside its declared maxlen decodes whatever the receiver cap says, so the
+        // two can never both be in play — which is what the pair of arguments makes
+        // structural rather than a caller's discipline.
+        val eight = ByteArray(8) { 0x62 }
+        assertEquals("bbbbbbbb", PayloadAcc().string(8, 0, eight, 0, 8, 16, 2))
+        assertContentEquals(eight, PayloadAcc().blob(8, 0, eight, 0, 8, 16, 2))
+    }
+
+    @Test
+    fun aSplitPayloadIsRejectedOnItsFirstChunk() {
+        // The check is at the length header, not at completion: an over-cap payload
+        // arriving one byte at a time never gets to accumulate its first byte.
+        val acc = PayloadAcc()
+        val e = assertFailsWith<SofabException> { acc.blob(1000, 0, payload, 0, 1, NO_MAXLEN, 999) }
+        assertEquals(SofabError.LIMIT_EXCEEDED, e.error)
+        assertEquals(0, acc.size)
     }
 
     // -----------------------------------------------------------------------
