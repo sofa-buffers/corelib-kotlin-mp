@@ -35,6 +35,11 @@ kotlin {
             // the one CORELIB_PLAN §8 requires the repo to carry, never a duplicate
             // under a resources directory that could drift from it.
             systemProperty("sofab.vectors", layout.projectDirectory.file("assets/test_vectors.json").asFile.path)
+            // The conformance run states how many vectors and checks it executed
+            // (CORELIB_PLAN §7.2); those lines are worthless if only the local
+            // console ever sees them, so the test JVM's stdout goes to the build
+            // log — and therefore into the CI run's output.
+            testLogging { showStandardStreams = true }
         }
     }
 

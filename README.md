@@ -371,7 +371,8 @@ from the message.
 The suite is the shared conformance vectors — read straight from
 `assets/test_vectors.json`, the copy the repo carries anyway, never a duplicate
 that could drift — driven through encode, chunked encode, decode, chunked decode,
-skip-ids and roundtrip, plus the malformed-input and truncation tables, the
+skip-ids (whole and one byte at a time) and roundtrip — each scenario printing how
+many vectors and checks it ran — plus the malformed-input and truncation tables, the
 chunk-lifetime scrub, the taking- and copying-sink handovers, the `arrayBulk`
 narrowing and destination rules, the fp32 signaling-NaN round trip and the
 JVM-only allocation measurement.
