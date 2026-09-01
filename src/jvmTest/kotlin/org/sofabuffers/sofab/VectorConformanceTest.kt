@@ -336,18 +336,21 @@ class VectorConformanceTest {
     /**
      * The vector file carries blocks beside `vectors` — `invalid_utf8`, and
      * `sequence_growth`, whose cases are keyed by a delivery order of element ids
-     * rather than by bytes. §7.2 item 8 (growth) is not implemented here yet; the
-     * loader must ignore the block rather than fail or warn on it, which is what
-     * keeps this repo able to adopt the shared file verbatim (§7.1).
+     * rather than by bytes and are run by [SequenceGrowthTest] (§7.2 item 8). Every
+     * block this port runs must be present, and a block it does not run must be
+     * ignored rather than fail or warn, which is what keeps this repo able to adopt
+     * the shared file verbatim (§7.1).
      */
     @Test
-    fun unknownTopLevelBlocksAreTolerated() {
+    fun everyBlockThisPortRunsIsPresentAndOthersAreTolerated() {
         assertEquals("sofabuffers-test-vectors", Vectors.format, "the loader read the shared file")
-        assertTrue(Vectors.blocks.containsAll(setOf("vectors", "invalid_utf8")), "the blocks this port runs")
-        val notRun = Vectors.blocks - setOf("format", "version", "description", "notes", "vectors", "invalid_utf8")
+        val run = setOf("vectors", "invalid_utf8", "sequence_growth")
+        assertTrue(Vectors.blocks.containsAll(run), "the blocks this port runs are all present")
+        val notRun = Vectors.blocks - setOf("format", "version", "description", "notes") - run
         println("[test-vectors] top-level blocks present but not run here: ${notRun.ifEmpty { setOf("none") }}")
-        assertTrue(vectors.isNotEmpty(), "the vectors block loaded beside the blocks this port does not run")
-        assertTrue(invalidUtf8.isNotEmpty(), "the invalid_utf8 block loaded beside them too")
+        assertTrue(vectors.isNotEmpty(), "the vectors block loaded")
+        assertTrue(invalidUtf8.isNotEmpty(), "the invalid_utf8 block loaded")
+        assertTrue(Vectors.sequenceGrowth.isNotEmpty(), "the sequence_growth block loaded")
     }
 
     // --- negative vectors: invalid UTF-8 (CORELIB_PLAN §6.4) -----------------
@@ -691,6 +694,15 @@ internal object Vectors {
 
     val positive: List<JsonObject> = root["vectors"]!!.jsonArray.map { it.jsonObject }
     val invalidUtf8: List<JsonObject> = root["invalid_utf8"]?.jsonArray.orEmpty().map { it.jsonObject }
+
+    /**
+     * The growth cases of CORELIB_PLAN §7.2 item 8, run by [SequenceGrowthTest].
+     *
+     * Keyed by a delivery sequence of element ids rather than by bytes — two ports
+     * that grow differently emit identical bytes — so they share no shape with a
+     * vector and are read as raw objects where they are replayed.
+     */
+    val sequenceGrowth: List<JsonObject> = root["sequence_growth"]?.jsonArray.orEmpty().map { it.jsonObject }
 
     /** The file's `format` tag, as read. */
     val format: String = root.str("format")
