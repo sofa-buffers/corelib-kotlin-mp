@@ -359,4 +359,90 @@ class PayloadAccTest {
         assertTrue(acc.size == 2)
         assertContentEquals(byteArrayOf(2, 3), acc.toByteArray())
     }
+
+    /**
+     * The §6.2.1 comparison reachable on its own, for a caller to make at the
+     * **length word** — the point §6.2.1 actually names: "at the count/length
+     * header, before the allocation it is meant to prevent".
+     *
+     * [PayloadAcc.string] cannot be that point by itself. It fires only once a
+     * payload byte exists, so a message whose length word declares 100 bytes and
+     * then *ends* reaches no chunk, no call and no verdict — and the decode
+     * answers `INCOMPLETE` for bytes already refused, which §6.3 makes the wrong
+     * category (the refusal is terminal) and §5.2.4 makes an invitation to feed a
+     * stream that will never be accepted. Three bytes claiming a hundred is the
+     * shape that matters.
+     */
+    @Test
+    fun `an over-cap length is refused with no payload at all`() {
+        val s = assertFailsWith<SofabException> { PayloadAcc.checkStringLength(100, NO_MAXLEN, 8) }
+        assertEquals(SofabError.LIMIT_EXCEEDED, s.error)
+
+        val b = assertFailsWith<SofabException> { PayloadAcc.checkBlobLength(1 shl 20, NO_MAXLEN, 8) }
+        assertEquals(SofabError.LIMIT_EXCEEDED, b.error)
+    }
+
+    /** A length at or below the cap passes the header check silently. */
+    @Test
+    fun `an in-cap length passes the header check`() {
+        PayloadAcc.checkStringLength(8, NO_MAXLEN, 8)
+        PayloadAcc.checkStringLength(0, NO_MAXLEN, 8)
+        PayloadAcc.checkBlobLength(8, NO_MAXLEN, 8)
+    }
+
+    /**
+     * The exclusivity rule at the header too (§6.2.1: the caps "MUST NOT be
+     * applied to a field the schema already bounds"): a declared `maxlen` governs
+     * alone, and its breach is INVALID_MSG — never the cap's category, even when
+     * the maxlen sits far above the cap.
+     */
+    @Test
+    fun `the header check gives a schema-bounded field its own category`() {
+        PayloadAcc.checkStringLength(20, 32, 8)
+        val e = assertFailsWith<SofabException> { PayloadAcc.checkStringLength(100, 32, 8) }
+        assertEquals(SofabError.INVALID_MSG, e.error)
+    }
+
+    /** An unstated cap is a caller defect here too, never read as "unlimited". */
+    @Test
+    fun `the header check refuses an unstated cap`() {
+        assertEquals(
+            SofabError.ARGUMENT,
+            assertFailsWith<SofabException> { PayloadAcc.checkStringLength(1, NO_MAXLEN, -1) }.error,
+        )
+        assertEquals(
+            SofabError.ARGUMENT,
+            assertFailsWith<SofabException> { PayloadAcc.checkBlobLength(1, NO_MAXLEN, -1) }.error,
+        )
+    }
+
+    /**
+     * One implementation, two application points (§6.2.1, "one implementation,
+     * wherever it runs"): the payload call answers identically to the header check
+     * for every length, so an accumulator driven by hand — without the header call
+     * — is still bounded, and a caller making both cannot get two verdicts out of
+     * one length.
+     */
+    @Test
+    fun `the header check and the payload call agree on every length`() {
+        for (total in intArrayOf(0, 1, 7, 8, 9, 100, 1 shl 20)) {
+            var header: SofabError? = null
+            try {
+                PayloadAcc.checkStringLength(total, NO_MAXLEN, 8)
+            } catch (e: SofabException) {
+                header = e.error
+            }
+            var chunk: SofabError? = null
+            try {
+                // One byte of a `total`-byte payload: enough to reach the guard,
+                // never enough to complete anything.
+                val data = ByteArray(maxOf(total, 1))
+                PayloadAcc().string(total, 0, data, 0, minOf(total, 1), NO_MAXLEN, 8)
+            } catch (e: SofabException) {
+                chunk = e.error
+            }
+            assertEquals(header, chunk, "length $total must get one verdict, not two")
+        }
+    }
+
 }

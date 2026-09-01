@@ -224,60 +224,119 @@ public class PayloadAcc : FlushSink {
         return buf.copyOf(total)
     }
 
-    /**
-     * Reject an announced [total] the caller may not accept, at the length header
-     * and before a byte is buffered (CORELIB_PLAN §6.2.1).
-     *
-     * Exactly one of the two numbers applies, and the schema picks which. A
-     * declared [maxlen] is a statement about **validity**: a longer payload
-     * contradicts the schema both peers agreed on, so it is malformed input
-     * (MESSAGE_SPEC §7.1) and the receiver cap must not be applied to it at all.
-     * Where the schema declares nothing — [maxlen] negative — the field is
-     * unbounded by the *message* and bounded by the *receiver* instead: [rmax] is
-     * a deployment's capacity decision, the bytes are well formed, the same
-     * payload decodes for a receiver configured more loosely, and the verdict is
-     * therefore the [SofabError.LIMIT_EXCEEDED] policy category rather than
-     * [SofabError.INVALID_MSG] (§6.3) — or, where the call stated no cap at all,
-     * [SofabError.ARGUMENT]; see [refuse].
-     *
-     * Neither number is this class's. Both arrive per call, are used for this one
-     * comparison and are not retained; nothing here defaults, invents or clamps to
-     * a limit, and a payload is never truncated to fit one.
-     */
-    private fun bound(total: Int, maxlen: Int, rmax: Int, noun: String, which: String) {
-        if (maxlen >= 0) {
-            if (total > maxlen) {
-                throw SofabException(SofabError.INVALID_MSG, "$noun $total above declared maxlen $maxlen")
-            }
-        } else if (total > rmax) {
-            refuse(total, rmax, noun, which)
+    public companion object {
+        /**
+         * Refuse an announced `string` length this field may not accept — the
+         * §6.2.1 comparison on its own, for a caller to make at the **length
+         * word**.
+         *
+         * [string] calls the same routine first, so a caller that only routes
+         * payload chunks is already covered. Call this in addition from
+         * [Visitor.fixlenBegin] to close the case no payload callback can see: a
+         * message whose length word declares more than the cap and then *ends*.
+         * There is no chunk, so there is no [string] call, and the decode reports
+         * `INCOMPLETE` for bytes this receiver has already refused — the wrong
+         * category (§6.3 makes the refusal terminal, and no continuation can lift
+         * it) and an active invitation to feed more of a stream that will never be
+         * accepted. Three bytes claiming a hundred, or five claiming a megabyte,
+         * would hold a connection open: the amplification the caps exist to close.
+         *
+         * Calling it at both points is not two implementations of the rule. It is
+         * this one, applied where §6.2.1 requires it — "at the count/length header,
+         * before the allocation it is meant to prevent" — and again where an
+         * accumulator driven by hand would otherwise slip past it.
+         *
+         * **Only for a field this message actually reads.** §6.2.1: "a skipped
+         * field is never capped" — a limit bounds an allocation, and a field walked
+         * over allocates nothing. The caller resolves the destination, and the
+         * MESSAGE_SPEC §7.3 subtype test, before it gets here.
+         *
+         * @param total the announced payload length, as the `fixlen_word` gives it
+         * @param maxlen the field's schema `maxlen`, or a negative number where the
+         *     schema declares none
+         * @param rmaxlen the receiver's configured `max_dyn_string_len`, applied
+         *     only where [maxlen] is negative
+         * @throws SofabException [SofabError.INVALID_MSG] above a declared
+         *     [maxlen]; [SofabError.LIMIT_EXCEEDED] above a stated [rmaxlen];
+         *     [SofabError.ARGUMENT] where a schema-unbounded field was handed no
+         *     cap at all
+         */
+        public fun checkStringLength(total: Int, maxlen: Int, rmaxlen: Int) {
+            bound(total, maxlen, rmaxlen, "string length", "max_dyn_string_len")
         }
-    }
 
-    /**
-     * Name the refusal a schema-unbounded [total] has earned: a stated cap it
-     * overruns, or a cap that was never stated at all (CORELIB_PLAN §6.3).
-     *
-     * Out of line, so the check itself stays a single compare on a call generated
-     * code already makes and the message building never sits on the hot path.
-     *
-     * The two categories say different things and are not interchangeable.
-     * [SofabError.LIMIT_EXCEEDED] means *"raise my limit, or the sender must send
-     * less"*: a receiver cap was configured, these bytes are well formed, and the
-     * same payload decodes for a receiver configured more loosely. A negative
-     * [rmax] is not a small limit and not an unlimited one — it is the **absence**
-     * of the number §6.2.1 requires the caller to supply, so the mistake is in the
-     * **call** and the category is [SofabError.ARGUMENT] (§6.3's
-     * `InvalidArgument`). Reporting that as `LIMIT_EXCEEDED` would name a receiver
-     * policy the deployment never set and promise a limit to raise that does not
-     * exist. The refusal itself is the same either way: §6.2.1 forbids reading an
-     * omitted cap as *unlimited*, so an unstated cap still decodes nothing.
-     */
-    private fun refuse(total: Int, rmax: Int, noun: String, which: String): Nothing {
-        if (rmax < 0) {
-            throw SofabException(SofabError.ARGUMENT, "$which not stated (cap $rmax) for $noun $total")
+        /**
+         * Refuse an announced `blob` length this field may not accept — the `blob`
+         * twin of [checkStringLength], down to why it exists. A `blob` and a
+         * `string` are separate limits.
+         *
+         * @param total the announced payload length, as the `fixlen_word` gives it
+         * @param maxlen the field's schema `maxlen`, or a negative number where the
+         *     schema declares none
+         * @param rmaxlen the receiver's configured `max_dyn_blob_len`, applied only
+         *     where [maxlen] is negative
+         * @throws SofabException as [checkStringLength]
+         */
+        public fun checkBlobLength(total: Int, maxlen: Int, rmaxlen: Int) {
+            bound(total, maxlen, rmaxlen, "blob length", "max_dyn_blob_len")
         }
-        throw SofabException(SofabError.LIMIT_EXCEEDED, "$noun $total above configured limit $rmax")
+
+        /**
+         * Reject an announced [total] the caller may not accept, at the length header
+         * and before a byte is buffered (CORELIB_PLAN §6.2.1).
+         *
+         * Exactly one of the two numbers applies, and the schema picks which. A
+         * declared [maxlen] is a statement about **validity**: a longer payload
+         * contradicts the schema both peers agreed on, so it is malformed input
+         * (MESSAGE_SPEC §7.1) and the receiver cap must not be applied to it at all.
+         * Where the schema declares nothing — [maxlen] negative — the field is
+         * unbounded by the *message* and bounded by the *receiver* instead: [rmax] is
+         * a deployment's capacity decision, the bytes are well formed, the same
+         * payload decodes for a receiver configured more loosely, and the verdict is
+         * therefore the [SofabError.LIMIT_EXCEEDED] policy category rather than
+         * [SofabError.INVALID_MSG] (§6.3) — or, where the call stated no cap at all,
+         * [SofabError.ARGUMENT]; see [refuse].
+         *
+         * Neither number is this class's. Both arrive per call, are used for this one
+         * comparison and are not retained; nothing here defaults, invents or clamps to
+         * a limit, and a payload is never truncated to fit one.
+         */
+        private fun bound(total: Int, maxlen: Int, rmax: Int, noun: String, which: String) {
+            if (maxlen >= 0) {
+                if (total > maxlen) {
+                    throw SofabException(SofabError.INVALID_MSG, "$noun $total above declared maxlen $maxlen")
+                }
+            } else if (total > rmax) {
+                refuse(total, rmax, noun, which)
+            }
+        }
+
+        /**
+         * Name the refusal a schema-unbounded [total] has earned: a stated cap it
+         * overruns, or a cap that was never stated at all (CORELIB_PLAN §6.3).
+         *
+         * Out of line, so the check itself stays a single compare on a call generated
+         * code already makes and the message building never sits on the hot path.
+         *
+         * The two categories say different things and are not interchangeable.
+         * [SofabError.LIMIT_EXCEEDED] means *"raise my limit, or the sender must send
+         * less"*: a receiver cap was configured, these bytes are well formed, and the
+         * same payload decodes for a receiver configured more loosely. A negative
+         * [rmax] is not a small limit and not an unlimited one — it is the **absence**
+         * of the number §6.2.1 requires the caller to supply, so the mistake is in the
+         * **call** and the category is [SofabError.ARGUMENT] (§6.3's
+         * `InvalidArgument`). Reporting that as `LIMIT_EXCEEDED` would name a receiver
+         * policy the deployment never set and promise a limit to raise that does not
+         * exist. The refusal itself is the same either way: §6.2.1 forbids reading an
+         * omitted cap as *unlimited*, so an unstated cap still decodes nothing.
+         */
+        private fun refuse(total: Int, rmax: Int, noun: String, which: String): Nothing {
+            if (rmax < 0) {
+                throw SofabException(SofabError.ARGUMENT, "$which not stated (cap $rmax) for $noun $total")
+            }
+            throw SofabException(SofabError.LIMIT_EXCEEDED, "$noun $total above configured limit $rmax")
+        }
+
     }
 
     /**
