@@ -30,6 +30,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import org.junit.jupiter.api.AfterAll
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
@@ -44,14 +45,17 @@ class VectorConformanceTest {
 
     @Test
     fun encodeVectors() {
-        for (v in vectors) {
+        for (v in VectorRun.eligible("encode", vectors)) {
             val offset = v.int("offset")
-            val buf = ByteArray(4096)
+            // Sized from the vector itself rather than from a fixed constant: a
+            // message longer than the buffer would be a loud BUFFER_FULL, and no
+            // cap here can quietly bound what the suite is allowed to carry.
+            val buf = ByteArray(offset + v.serializedLength())
             val os = OStream(buf, offset)
-            for (f in v.arr("fields")) replay(os, f.jsonObject)
-            assertEquals(v.serializedHex(), hex(buf, offset, offset + os.bytesUsed), "encode ${v.name()}")
+            replayAll(os, v)
+            VectorRun.eq("encode", v, v.serializedHex(), hex(buf, offset, offset + os.bytesUsed), "encode ${v.name()}")
         }
-        assertTrue(vectors.size >= 80, "the shared suite carries the full vector set")
+        VectorRun.report("encode")
     }
 
     /**
@@ -62,37 +66,47 @@ class VectorConformanceTest {
     @Test
     fun chunkedEncodeVectors() {
         for (room in intArrayOf(Sofab.MIN_OUTPUT_BUFFER, 3, 7)) {
-            for (v in vectors) {
+            for (v in VectorRun.eligible("encode/chunked", vectors)) {
                 val collected = ArrayList<Byte>()
                 val os = OStream(ByteArray(room), v.int("offset"), { data, off, len ->
                     for (i in off until off + len) collected.add(data[i])
                 })
-                for (f in v.arr("fields")) replay(os, f.jsonObject)
+                replayAll(os, v)
                 os.flush()
                 val out = collected.toByteArray()
                 // The sink receives the reserved offset region too; the message
                 // itself starts after it.
-                assertEquals(
+                VectorRun.eq(
+                    "encode/chunked",
+                    v,
                     v.serializedHex(),
                     hex(out, v.int("offset"), out.size),
                     "chunked encode (buffer $room) ${v.name()}",
                 )
             }
         }
+        VectorRun.report("encode/chunked")
     }
 
     // --- decode: feed serialized.hex and compare the event stream -------------
 
     @Test
     fun decodeVectors() {
-        for (v in vectors) {
+        for (v in VectorRun.eligible("decode", vectors)) {
             val wire = unhex(v.serializedHex())
             val visitor = RecordingVisitor()
             val input = IStream()
             input.feed(wire, visitor)
-            assertEquals(expectedEvents(v), visitor.events, "decode ${v.name()}")
-            assertEquals(DecodeStatus.COMPLETE, input.status, "decode ${v.name()} consumes the message exactly")
+            VectorRun.eq("decode", v, expectedEvents(v), visitor.events, "decode ${v.name()}")
+            VectorRun.eq(
+                "decode",
+                v,
+                DecodeStatus.COMPLETE,
+                input.status,
+                "decode ${v.name()} consumes the message exactly",
+            )
         }
+        VectorRun.report("decode")
     }
 
     /**
@@ -103,29 +117,69 @@ class VectorConformanceTest {
     @Test
     fun chunkedDecodeVectors() {
         for (chunk in intArrayOf(1, 3, 7)) {
-            for (v in vectors) {
+            for (v in VectorRun.eligible("decode/chunked", vectors)) {
                 val wire = unhex(v.serializedHex())
-                assertEquals(
+                VectorRun.eq(
+                    "decode/chunked",
+                    v,
                     expectedEvents(v),
                     decodeEventsChunked(wire, chunk),
                     "decode/${chunk}B ${v.name()}",
                 )
             }
         }
+        VectorRun.report("decode/chunked")
     }
 
     /**
-     * Skip-ids decoding: a receiver that ignores the vector's `skip_ids` (and, for a
-     * sequence id, the whole sub-tree under it) must still recover every other
-     * field, proving the decoder resyncs on the field after any skipped field or
-     * sub-sequence at any nesting depth.
+     * §7.2 item 7 — skip-ids decoding, for **every** vector that carries `skip_ids`
+     * (58 in the current shared suite, of which 36 are the `skip/matrix` cross
+     * product and 16 the `skip` axes beside it). A receiver that ignores those ids
+     * — and, for a sequence id, the whole sub-tree under it, at any nesting depth —
+     * must still recover every other field with its exact value and consume the
+     * message exactly.
+     *
+     * **What "skip" means in this port, precisely.** This corelib has no dedicated
+     * skip path: there is no `skip(id)` call and no length-jump branch to take. The
+     * decoder always walks every field and hands it to the [Visitor], and a receiver
+     * declines a field simply by not implementing its callback (`IStream`'s own
+     * words: "no explicit skip bookkeeping"). So [SkipVisitor] below drops the
+     * callbacks for the skipped ids, and this scenario re-drives the *same* decoder
+     * code as `decode` under a different expectation filter. No mutation can ever
+     * fail `skip` alone here — what it does add over `decode` is that the decoder's
+     * resync onto the next field header is asserted against an expectation built
+     * independently (by [expectedEventsWithSkip]) rather than against the full
+     * event stream, across the whole 36-cell wire-type cross product.
+     *
+     * `chunk == 0` feeds the message whole; `chunk == 1` feeds it one byte at a
+     * time, so every skip is exercised across chunk boundaries, which is where a
+     * resync bug that a single feed hides shows up — and it demonstrably does: a
+     * seeded one-byte-short `fixlen` length in the *byte-at-a-time* branch alone
+     * fails 17 vectors here while the whole-buffer scenarios stay green.
      */
     @Test
     fun skipIdsDecodeVectors() {
-        var ran = 0
-        for (v in vectors) {
-            val skip = v["skip_ids"]?.jsonArray?.map { it.jsonPrimitive.content.toInt() }?.toSet() ?: continue
-            ran++
+        val withSkipIds = vectors.filter { it["skip_ids"] != null }
+        // Measured on the ids actually fed to the decoder, never re-read from the
+        // JSON — see the bounds asserted after the loop.
+        var fedMaxSkipIds = 0
+        var fedMaxSkippedId = 0
+        for (v in VectorRun.eligible("skip", withSkipIds)) {
+            val declared = v["skip_ids"]!!.jsonArray
+            val skipList = declared.map { it.jsonPrimitive.content.toInt() }
+            val skip = skipList.toSet()
+            // The C harness had a fixed MAXSKIP that silently *truncated* an
+            // over-long list: the extra ids got read instead of skipped, and because
+            // the expectation was derived from the same truncated list the vector
+            // still passed while testing less. Both assertions are against the
+            // *declared* array rather than against the consumed list's own size —
+            // comparing a list to a set built from it would only ever catch a
+            // duplicate. The first catches a cap applied anywhere between the JSON
+            // and the decoder; the second, an id that collapses into another.
+            assertEquals(declared.size, skipList.size, "every skip id of ${v.name()} reaches the decoder")
+            assertEquals(declared.size, skip.size, "the skip ids of ${v.name()} are distinct")
+            fedMaxSkipIds = maxOf(fedMaxSkipIds, skip.size)
+            fedMaxSkippedId = maxOf(fedMaxSkippedId, skip.max())
             val wire = unhex(v.serializedHex())
             for (chunk in intArrayOf(0, 1, 3)) {
                 val visitor = SkipVisitor(skip)
@@ -140,43 +194,163 @@ class VectorConformanceTest {
                         i += n
                     }
                 }
-                assertEquals(DecodeStatus.COMPLETE, input.status, "skip ${v.name()}")
-                assertEquals(
+                VectorRun.eq("skip", v, DecodeStatus.COMPLETE, input.status, "skip ${v.name()} (chunk $chunk)")
+                VectorRun.eq(
+                    "skip",
+                    v,
                     expectedEventsWithSkip(v, skip),
                     visitor.out.events,
                     "skip ${v.name()} (chunk $chunk)",
                 )
             }
         }
-        assertTrue(ran > 0, "the suite carries skip_ids vectors")
+        VectorRun.report("skip")
+
+        // The suite must not shrink unnoticed: every vector the shared file marks
+        // with `skip_ids` has to have run the scenario (or been gated out by
+        // `requires`, which this build never does — see [CAPABILITIES]).
+        assertEquals(
+            withSkipIds.size,
+            VectorRun.ran("skip") + VectorRun.gatedOut("skip"),
+            "every skip_ids vector is either run or gated out",
+        )
+        assertTrue(withSkipIds.size >= 58, "the shared suite carries the full skip set (58 vectors)")
+        // The deep end of the axis, taken from `skip` — the set the decoder was
+        // handed — so a cap anywhere on the consumption path lowers it and fails
+        // here. Lower bounds, so a larger shared file may only ever raise them.
+        // Six of the 58 vectors carry more than four ids; the longest list is 9.
+        assertTrue(fedMaxSkipIds >= 9, "the longest skip_ids list fed to the decoder is 9 ids, saw $fedMaxSkipIds")
+        // §7.2 item 4's three-byte field header, pinned where it is actually
+        // exercised: `skip_large_id` skips id 100000. Measuring the maximum over
+        // *all* field ids instead would be satisfied by unrelated vectors carrying
+        // 2147483647 and would still pass if every large-id skip vector vanished.
+        assertTrue(
+            fedMaxSkippedId >= 100000,
+            "the largest id actually skipped is 100000, a three-byte field header, saw $fedMaxSkippedId",
+        )
+        for (group in listOf("skip/matrix", "skip")) {
+            val inGroup = vectors.filter { it.str("group") == group }
+            assertTrue(inGroup.isNotEmpty(), "group $group is present")
+            assertTrue(
+                inGroup.all { it["skip_ids"] != null },
+                "every vector in group $group drives the skip scenario",
+            )
+        }
+        // Lower bounds, not equalities: adopting a larger shared file may only ever
+        // raise them, while a file that shrank — or a loader that stopped seeing
+        // part of it — fails here instead of reporting a smaller green run.
+        assertTrue(
+            vectors.count { it.str("group") == "skip/matrix" } >= 36,
+            "the skip matrix is complete (36 vectors)",
+        )
+        assertTrue(
+            vectors.count { it.str("group") == "skip" } >= 16,
+            "the skip axes beside the matrix are complete (16 vectors)",
+        )
     }
 
     /** Roundtrip: the decoded event stream survives an encode of the same ops. */
     @Test
     fun roundTripVectors() {
-        for (v in vectors) {
-            val buf = ByteArray(4096)
-            val os = OStream(buf)
-            for (f in v.arr("fields")) replay(os, f.jsonObject)
-            val wire = buf.copyOf(os.bytesUsed)
-            assertEquals(expectedEvents(v), decodeEvents(wire), "roundtrip ${v.name()}")
+        for (v in VectorRun.eligible("roundtrip", vectors)) {
+            val buf = ByteArray(v.int("offset") + v.serializedLength())
+            val os = OStream(buf, v.int("offset"))
+            replayAll(os, v)
+            val wire = buf.copyOfRange(v.int("offset"), v.int("offset") + os.bytesUsed)
+            VectorRun.eq("roundtrip", v, expectedEvents(v), decodeEvents(wire), "roundtrip ${v.name()}")
+        }
+        VectorRun.report("roundtrip")
+    }
+
+    /**
+     * `requires` gating is applied per vector (see [VectorRun.eligible]) rather than
+     * assumed away, so a feature-reduced build would run the part of the matrix it
+     * can represent instead of dropping it whole. This corelib has no
+     * `SOFAB_DISABLE_*` switches — every wire feature is compiled in — so
+     * [CAPABILITIES] holds every tag and nothing is in fact gated out; the run
+     * report prints that as `0 gated`.
+     *
+     * A tag this port has never been told about is refused loudly by the gate; this
+     * guard names the same failure at the file level, so a suite that grows a new
+     * capability is caught even before a vector carrying it runs.
+     */
+    @Test
+    fun requiresTagsAreKnown() {
+        for (v in vectors + invalidUtf8) {
+            for (cap in v["requires"]?.jsonArray.orEmpty()) {
+                assertTrue(
+                    cap.jsonPrimitive.content in KNOWN_CAPABILITIES,
+                    "unknown capability tag in ${v.name()}: $cap",
+                )
+            }
         }
     }
 
     /**
-     * This corelib compiles in every wire feature — it has no `SOFAB_DISABLE_*`
-     * switches — so no vector is skipped and `requires` is ignored by design. Guard
-     * that the suite never introduces a capability tag this port has not been told
-     * about, which would otherwise be silently treated as supported.
+     * The *file* must arrive whole. These are the sizes the current shared suite
+     * reaches — 131 vectors, 9-entry `skip_ids` lists, ids up to the 32-bit maximum,
+     * 200-element arrays, 130-byte payloads and fp64 arrays. A cap in the loader
+     * would drop one of them below its bound and fail here rather than quietly
+     * testing less.
+     *
+     * This half only measures what was *read*. What the run then *consumes* is
+     * checked where it is consumed, because a cap that shrinks input and expectation
+     * together is invisible to a check that re-reads the JSON: `replayAll` compares
+     * the sizes handed to the encoder against the sizes declared, per vector, and
+     * `skipIdsDecodeVectors` bounds the skip-id maxima on the set fed to the decoder.
      */
     @Test
-    fun requiresTagsAreKnown() {
-        val known = setOf("fixlen", "array", "sequence", "fp64", "int64")
-        for (v in vectors + invalidUtf8) {
-            for (cap in v["requires"]?.jsonArray.orEmpty()) {
-                assertTrue(cap.jsonPrimitive.content in known, "unknown capability tag in ${v.name()}: $cap")
+    fun loaderTruncatesNothing() {
+        var maxSkipIds = 0
+        var maxId = 0L
+        var maxElements = 0
+        var maxPayload = 0
+        var fp64Arrays = 0
+        for (v in vectors) {
+            maxSkipIds = maxOf(maxSkipIds, v["skip_ids"]?.jsonArray?.size ?: 0)
+            for (fe in v.arr("fields")) {
+                val f = fe.jsonObject
+                maxId = maxOf(maxId, f["id"]?.jsonPrimitive?.content?.toLong() ?: 0L)
+                when (f.str("op")) {
+                    "array" -> {
+                        maxElements = maxOf(maxElements, f.arr("values").size)
+                        if (f.str("element_type") == "fp64") fp64Arrays++
+                    }
+                    "string" -> maxPayload = maxOf(maxPayload, f.str("value").encodeToByteArray().size)
+                    "blob" -> maxPayload = maxOf(maxPayload, f.str("value_hex").length / 2)
+                }
             }
         }
+        assertTrue(vectors.size >= 131, "the shared suite carries 131 vectors, saw ${vectors.size}")
+        assertTrue(maxSkipIds >= 9, "skip_ids lists reach 9 entries, saw $maxSkipIds")
+        // The 32-bit maximum, not the three-byte-header axis: that one is about the
+        // ids a vector *skips*, and is asserted in `skipIdsDecodeVectors` on the ids
+        // actually handed to the decoder. This bound would be met by any vector
+        // carrying a large id, skipped or not.
+        assertTrue(maxId >= 2147483647L, "field ids reach the 32-bit maximum, saw $maxId")
+        assertTrue(maxElements >= 200, "arrays reach 200 elements, saw $maxElements")
+        assertTrue(maxPayload >= 130, "string/blob payloads reach 130 bytes, saw $maxPayload")
+        assertTrue(fp64Arrays >= 6, "the suite carries fp64 arrays, saw $fp64Arrays")
+    }
+
+    /**
+     * The vector file carries blocks beside `vectors` — `invalid_utf8`, and
+     * `sequence_growth`, whose cases are keyed by a delivery order of element ids
+     * rather than by bytes and are run by [SequenceGrowthTest] (§7.2 item 8). Every
+     * block this port runs must be present, and a block it does not run must be
+     * ignored rather than fail or warn, which is what keeps this repo able to adopt
+     * the shared file verbatim (§7.1).
+     */
+    @Test
+    fun everyBlockThisPortRunsIsPresentAndOthersAreTolerated() {
+        assertEquals("sofabuffers-test-vectors", Vectors.format, "the loader read the shared file")
+        val run = setOf("vectors", "invalid_utf8", "sequence_growth")
+        assertTrue(Vectors.blocks.containsAll(run), "the blocks this port runs are all present")
+        val notRun = Vectors.blocks - setOf("format", "version", "description", "notes") - run
+        println("[test-vectors] top-level blocks present but not run here: ${notRun.ifEmpty { setOf("none") }}")
+        assertTrue(vectors.isNotEmpty(), "the vectors block loaded")
+        assertTrue(invalidUtf8.isNotEmpty(), "the invalid_utf8 block loaded")
+        assertTrue(Vectors.sequenceGrowth.isNotEmpty(), "the sequence_growth block loaded")
     }
 
     // --- negative vectors: invalid UTF-8 (CORELIB_PLAN §6.4) -----------------
@@ -245,17 +419,60 @@ class VectorConformanceTest {
 
     // --- replay / expectation helpers ----------------------------------------
 
-    private fun replay(os: OStream, f: JsonObject) {
+    /**
+     * Replays every field of [v] into [os] and, in the same pass, records the sizes
+     * of what was actually handed to the encoder — then asserts that record against
+     * the sizes [v] declares.
+     *
+     * This is the guard against the bug class the C harness's fixed `MAXSKIP` was:
+     * a cap that truncates the *input* also truncates the *expectation* derived from
+     * it, so the vector still passes while testing less. Comparing what reached the
+     * encoder against what the file declares makes that visible — a `take(n)` on an
+     * array, a shortened payload or a dropped field lowers one side only.
+     */
+    private fun replayAll(os: OStream, v: JsonObject) {
+        val handed = Shape()
+        for (f in v.arr("fields")) replay(os, f.jsonObject, handed)
+        assertEquals(declaredShape(v), handed, "every field of ${v.name()} reached the encoder whole")
+    }
+
+    /** The sizes [v] declares, read from the JSON. The other half of [replayAll]. */
+    private fun declaredShape(v: JsonObject): Shape {
+        val s = Shape()
+        for (fe in v.arr("fields")) {
+            val f = fe.jsonObject
+            s.field(f["id"]?.jsonPrimitive?.content?.toLong() ?: 0L)
+            when (f.str("op")) {
+                "array" -> s.array(f.arr("values").size, f.str("element_type"))
+                "string" -> s.payload(f.str("value").encodeToByteArray().size)
+                "blob" -> s.payload(f.str("value_hex").length / 2)
+            }
+        }
+        return s
+    }
+
+    private fun replay(os: OStream, f: JsonObject, handed: Shape) {
         val id = f["id"]?.jsonPrimitive?.content?.toInt() ?: 0
+        handed.field(id.toLong())
         when (val op = f.str("op")) {
             "unsigned" -> os.writeUnsigned(id, f.str("value").toULong().toLong())
             "signed" -> os.writeSigned(id, f.str("value").toLong())
             "boolean" -> os.writeBoolean(id, f.str("value").toBoolean())
             "fp32" -> os.writeFp32(id, floatOf(f["value"]!!))
             "fp64" -> os.writeFp64(id, doubleOf(f["value"]!!))
-            "string" -> os.writeString(id, f.str("value"))
-            "blob" -> os.writeBlob(id, unhex(f.str("value_hex")))
-            "array" -> writeArray(os, id, f.str("element_type"), f.arr("values"))
+            // The payload sizes are taken from the very values passed below, never
+            // re-read from the JSON, so the two sides of [replayAll] stay independent.
+            "string" -> {
+                val text = f.str("value")
+                os.writeString(id, text)
+                handed.payload(text.encodeToByteArray().size)
+            }
+            "blob" -> {
+                val bytes = unhex(f.str("value_hex"))
+                os.writeBlob(id, bytes)
+                handed.payload(bytes.size)
+            }
+            "array" -> writeArray(os, id, f.str("element_type"), f.arr("values"), handed)
             // The vectors' `serialized` hex is the DENSE image, which always carries
             // the frame — including for the empty-sequence vectors. Replaying through
             // the raw encoder therefore closes with the frame-keeping form:
@@ -267,29 +484,45 @@ class VectorConformanceTest {
         }
     }
 
-    private fun writeArray(os: OStream, id: Int, elemType: String, values: JsonArray) {
+    /** Writes one array field and reports back how many elements the encoder was given. */
+    private fun writeArray(os: OStream, id: Int, elemType: String, values: JsonArray, handed: Shape) {
         val n = values.size
-        when (elemType) {
+        // Counted off the array object actually passed to the encoder, so a cap
+        // between the JSON and the call shows up as a count the vector did not declare.
+        val written = when (elemType) {
             "u8", "i8" -> {
                 val a = ByteArray(n) { longOf(values[it]).toByte() }
                 if (elemType[0] == 'u') os.writeArrayUnsigned(id, a) else os.writeArraySigned(id, a)
+                a.size
             }
             "u16", "i16" -> {
                 val a = ShortArray(n) { longOf(values[it]).toShort() }
                 if (elemType[0] == 'u') os.writeArrayUnsigned(id, a) else os.writeArraySigned(id, a)
+                a.size
             }
             "u32", "i32" -> {
                 val a = IntArray(n) { longOf(values[it]).toInt() }
                 if (elemType[0] == 'u') os.writeArrayUnsigned(id, a) else os.writeArraySigned(id, a)
+                a.size
             }
             "u64", "i64" -> {
                 val a = LongArray(n) { longOf(values[it]) }
                 if (elemType[0] == 'u') os.writeArrayUnsigned(id, a) else os.writeArraySigned(id, a)
+                a.size
             }
-            "fp32" -> os.writeArrayFp32(id, FloatArray(n) { floatOf(values[it]) })
-            "fp64" -> os.writeArrayFp64(id, DoubleArray(n) { doubleOf(values[it]) })
+            "fp32" -> {
+                val a = FloatArray(n) { floatOf(values[it]) }
+                os.writeArrayFp32(id, a)
+                a.size
+            }
+            "fp64" -> {
+                val a = DoubleArray(n) { doubleOf(values[it]) }
+                os.writeArrayFp64(id, a)
+                a.size
+            }
             else -> throw IllegalArgumentException("unknown element_type $elemType")
         }
+        handed.array(written, elemType)
     }
 
     /** The event list a vector's fields[] must produce, in [RecordingVisitor]'s form. */
@@ -436,6 +669,18 @@ class VectorConformanceTest {
             }
         }
     }
+
+    internal companion object {
+        /**
+         * §7.2: the run says what it ran. Printed once the class is done, after the
+         * per-scenario lines each test emits.
+         */
+        @JvmStatic
+        @AfterAll
+        fun reportTotals() {
+            VectorRun.reportTotal()
+        }
+    }
 }
 
 /** The shared vector file, parsed once for the whole suite. */
@@ -450,9 +695,147 @@ internal object Vectors {
     val positive: List<JsonObject> = root["vectors"]!!.jsonArray.map { it.jsonObject }
     val invalidUtf8: List<JsonObject> = root["invalid_utf8"]?.jsonArray.orEmpty().map { it.jsonObject }
 
+    /**
+     * The growth cases of CORELIB_PLAN §7.2 item 8, run by [SequenceGrowthTest].
+     *
+     * Keyed by a delivery sequence of element ids rather than by bytes — two ports
+     * that grow differently emit identical bytes — so they share no shape with a
+     * vector and are read as raw objects where they are replayed.
+     */
+    val sequenceGrowth: List<JsonObject> = root["sequence_growth"]?.jsonArray.orEmpty().map { it.jsonObject }
+
+    /** The file's `format` tag, as read. */
+    val format: String = root.str("format")
+
+    /** Every top-level block the file carries, run here or not. */
+    val blocks: Set<String> = root.keys
+
     init {
-        check(root.str("format") == "sofabuffers-test-vectors") { "unexpected vector file format" }
+        check(format == "sofabuffers-test-vectors") { "unexpected vector file format" }
     }
+}
+
+/**
+ * The sizes one vector's `fields[]` amount to: how many fields, the largest id, the
+ * largest and total element count, the largest and total payload, and how many fp64
+ * arrays. Built twice per replay — once from the JSON (what the file declares) and
+ * once from the values handed to the encoder (what the run consumed) — and compared,
+ * so the two can never shrink together and still agree. See `replayAll`.
+ */
+internal data class Shape(
+    var fields: Int = 0,
+    var maxId: Long = 0,
+    var maxElements: Int = 0,
+    var totalElements: Long = 0,
+    var maxPayload: Int = 0,
+    var totalPayload: Long = 0,
+    var fp64Arrays: Int = 0,
+) {
+    fun field(id: Long) {
+        fields++
+        maxId = maxOf(maxId, id)
+    }
+
+    fun payload(bytes: Int) {
+        maxPayload = maxOf(maxPayload, bytes)
+        totalPayload += bytes
+    }
+
+    fun array(count: Int, elementType: String) {
+        maxElements = maxOf(maxElements, count)
+        totalElements += count
+        if (elementType == "fp64") fp64Arrays++
+    }
+}
+
+/**
+ * Every `requires` tag the shared vector format defines. A tag outside this set is
+ * one this port has never been told about: the gate refuses it rather than reading
+ * it as "unsupported", which would drop vectors and still report a pass.
+ */
+internal val KNOWN_CAPABILITIES: Set<String> = setOf("fixlen", "array", "sequence", "fp64", "int64")
+
+/**
+ * The wire capabilities *this build* has, and therefore the `requires` tags it can
+ * satisfy. This corelib compiles every feature in — there is no `SOFAB_DISABLE_*`
+ * equivalent — so the set is the full one and no vector is gated out; the run
+ * report prints that as `0 gated`. The gate is still applied per vector, so a
+ * feature-reduced build would grade itself on the part of the matrix it can
+ * represent instead of dropping the matrix whole.
+ */
+internal val CAPABILITIES: Set<String> = KNOWN_CAPABILITIES
+
+/**
+ * What the vector run actually executed, per scenario: how many vectors it fed,
+ * how many assertions it made, and how many vectors `requires` gating held back.
+ *
+ * CORELIB_PLAN §7.2 asks the suite to *state* this. A count that silently drops —
+ * a truncated list, a scenario that stopped seeing half the file — is the failure
+ * mode a green run otherwise hides, so the numbers are printed on every run and
+ * the scenario tests assert against them.
+ */
+internal object VectorRun {
+    private class Tally {
+        val vectors = LinkedHashSet<String>()
+        val gated = LinkedHashSet<String>()
+        var checks = 0
+    }
+
+    private val scenarios = LinkedHashMap<String, Tally>()
+
+    private fun tally(scenario: String): Tally = scenarios.getOrPut(scenario) { Tally() }
+
+    /**
+     * The vectors [scenario] may run: those whose `requires` this build satisfies.
+     * An unknown tag is refused loudly — treating it as "unsupported" would test
+     * less while still reporting a pass.
+     */
+    fun eligible(scenario: String, candidates: List<JsonObject>): List<JsonObject> {
+        val t = tally(scenario)
+        return candidates.filter { v ->
+            val needs = v["requires"]?.jsonArray.orEmpty().map { it.jsonPrimitive.content }
+            for (cap in needs) {
+                require(cap in KNOWN_CAPABILITIES) { "unknown capability tag in ${v.name()}: $cap" }
+            }
+            val ok = needs.all { it in CAPABILITIES }
+            if (!ok) t.gated.add(v.name())
+            ok
+        }
+    }
+
+    /** One counted assertion against [v] in [scenario]. */
+    fun <T> eq(scenario: String, v: JsonObject, expected: T, actual: T, message: String) {
+        val t = tally(scenario)
+        t.vectors.add(v.name())
+        t.checks++
+        assertEquals(expected, actual, message)
+    }
+
+    /** How many distinct vectors [scenario] actually ran. */
+    fun ran(scenario: String): Int = tally(scenario).vectors.size
+
+    /** How many vectors `requires` gating held back from [scenario]. */
+    fun gatedOut(scenario: String): Int = tally(scenario).gated.size
+
+    fun report(scenario: String) {
+        val t = tally(scenario)
+        println(line(scenario, t.vectors.size, t.checks, t.gated.size))
+    }
+
+    fun reportTotal() {
+        val vectors = LinkedHashSet<String>()
+        val gated = LinkedHashSet<String>()
+        var checks = 0
+        for (t in scenarios.values) {
+            vectors.addAll(t.vectors)
+            gated.addAll(t.gated)
+            checks += t.checks
+        }
+        println(line("TOTAL (${scenarios.size} scenarios)", vectors.size, checks, gated.size))
+    }
+
+    private fun line(scenario: String, vectors: Int, checks: Int, gated: Int): String =
+        "[test-vectors] %-26s %4d vectors, %5d checks, %d gated by requires".format(scenario, vectors, checks, gated)
 }
 
 internal fun JsonObject.str(key: String): String = this[key]!!.jsonPrimitive.content
@@ -460,6 +843,7 @@ internal fun JsonObject.int(key: String): Int = this[key]?.jsonPrimitive?.conten
 internal fun JsonObject.arr(key: String): JsonArray = this[key]!!.jsonArray
 internal fun JsonObject.name(): String = str("name")
 internal fun JsonObject.serializedHex(): String = this["serialized"]!!.jsonObject.str("hex")
+internal fun JsonObject.serializedLength(): Int = this["serialized"]!!.jsonObject.int("length")
 
 /** A float value: a JSON number, or the literals "inf" / "-inf". */
 internal fun floatOf(e: JsonElement): Float {

@@ -371,10 +371,20 @@ from the message.
 The suite is the shared conformance vectors — read straight from
 `assets/test_vectors.json`, the copy the repo carries anyway, never a duplicate
 that could drift — driven through encode, chunked encode, decode, chunked decode,
-skip-ids and roundtrip, plus the malformed-input and truncation tables, the
+skip-ids (whole and one byte at a time) and roundtrip — each scenario printing how
+many vectors and checks it ran — plus the malformed-input and truncation tables, the
 chunk-lifetime scrub, the taking- and copying-sink handovers, the `arrayBulk`
 narrowing and destination rules, the fp32 signaling-NaN round trip and the
 JVM-only allocation measurement.
+
+`SequenceGrowthTest` runs the file's third top-level block (CORELIB_PLAN §7.2
+item 8). A wrapper array carries no element count, so its length is *highest
+present id + 1* and the container grows as elements arrive — in `Seq`, never in
+the codec. Two ports that grow differently emit identical bytes, so those cases
+are keyed by a delivery sequence of element ids instead: the port builds the
+message itself and asserts the resulting container length and outcome. The struct
+cases run through `Seq.reserveRowList`, which is where the element index meets the
+receiver cap.
 
 Most of the suite is in `commonTest`, so it runs unchanged on every target — the JS
 and native legs are what prove the portable little-endian path produces the JVM's
