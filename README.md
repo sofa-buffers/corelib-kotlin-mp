@@ -352,18 +352,22 @@ direction.
 
 The hot path allocates nothing on either side. That is measured, not only
 stated: `AllocationTest` (JVM) counts thread allocation across a complete encode
-and a complete decode and holds the count at zero after construction. Kotlin/JS
-and Kotlin/Native offer no per-thread allocation counter, so on those targets the
-property is **untested** — the codec is one `commonMain` source set, so it is the
-same code the JVM measurement covers. On Kotlin/JS a `Long` is additionally a heap
-object the runtime creates to represent a value; its size comes from the type, not
-from the message.
+and a complete decode and holds the count at zero after construction. It runs in a
+JVM of its own — the `jvmAllocationTest` task, which `check` depends on — because
+the count is only meaningful once the JIT has settled on the measured code, and
+sharing a JVM with the rest of the suite put a kilobyte of unrelated allocation
+inside the measured window. Kotlin/JS and Kotlin/Native offer no per-thread
+allocation counter, so on those targets the property is **untested** — the codec is
+one `commonMain` source set, so it is the same code the JVM measurement covers. On
+Kotlin/JS a `Long` is additionally a heap object the runtime creates to represent a
+value; its size comes from the type, not from the message.
 
 ## Build & test
 
 ```bash
 ./gradlew build          # compile every target, run the full suite on JVM, Node and native
 ./gradlew jvmTest        # the suite on the JVM only
+./gradlew jvmAllocationTest   # the §6.6.4 allocation measurement, alone in its own JVM
 ./gradlew allTests       # every target's tests, aggregated
 ./gradlew koverHtmlReport koverVerify   # coverage report, and the family's >90% gate
 ```
