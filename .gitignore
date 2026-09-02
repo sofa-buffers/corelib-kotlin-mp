@@ -14,3 +14,6 @@ local.properties
 .idea/
 *.iml
 .vscode/
+
+# Claude Code's local session state and worktrees, never part of the library.
+.claude/
