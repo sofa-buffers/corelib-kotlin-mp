@@ -2,5 +2,15 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
     "config:recommended"
+  ],
+  "packageRules": [
+    {
+      "description": "Stay on gradle/actions v5. v6 extracts caching into gradle-actions-caching, a proprietary component governed by Gradle's separate Terms of Use (https://gradle.com/legal/terms-of-use/) rather than the action's MIT licence. That is a licensing decision, not a maintenance one; it was made when #18 was closed and is re-stated here because closing the bot's PR did not hold. Updates within 5.x are still wanted.",
+      "matchPackageNames": [
+        "gradle/actions",
+        "gradle/actions/**"
+      ],
+      "allowedVersions": "<6"
+    }
   ]
 }
