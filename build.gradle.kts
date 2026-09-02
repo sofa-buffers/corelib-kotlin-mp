@@ -87,6 +87,20 @@ val benchRuntime: FileCollection = files(
     configurations.named("jvmRuntimeClasspath"),
 )
 
+// --- the allocation measurement runs in a JVM of its own --------------------
+//
+// AllocationTest reads ThreadMXBean.currentThreadAllocatedBytes around a loop and
+// asserts an exact figure. That is sound only once the JIT has reached a steady
+// state for the measured code, and downstream of the rest of the suite in a shared
+// JVM it has not: the compiler queue and OSR timing differ, a few kilobytes of
+// non-codec allocation land inside the measured window, and a cold `./gradlew
+// build` went red in 2 of 6 runs for a reason unrelated to the change under review
+// (#34). Run alone it is the first thing its JVM does, which is the state §6.6.4's
+// measurement assumes. So the suite's JVM excludes the class and a task of its own
+// runs it — one `check` depends on, so `./gradlew build` still runs the measurement.
+// Naming it once keeps the exclusion and the inclusion from drifting apart.
+val ALLOCATION_TEST = "org.sofabuffers.sofab.AllocationTest"
+
 // bench/run_callgrind.sh drives the same workloads through a bare `java` command
 // (Callgrind must see one JVM per rep count, with nothing of Gradle's in it), so
 // it needs the runtime classpath — the JVM jar plus kotlin-stdlib — as a string.
@@ -96,7 +110,22 @@ val benchRuntime: FileCollection = files(
 // silently not run. Declaring the file an input is what makes it a real gate.
 tasks.named<Test>("jvmTest") {
     inputs.file(rootProject.file("README.md")).withPathSensitivity(PathSensitivity.RELATIVE)
+    filter { excludeTestsMatching(ALLOCATION_TEST) }
 }
+
+val jvmTestCompilation = kotlin.jvm().compilations.getByName("test")
+
+val jvmAllocationTest = tasks.register<Test>("jvmAllocationTest") {
+    group = "verification"
+    description = "The §6.6.4 allocation measurement, alone in its own JVM."
+    testClassesDirs = jvmTestCompilation.output.classesDirs
+    classpath = jvmTestCompilation.output.allOutputs + jvmTestCompilation.runtimeDependencyFiles
+    useJUnitPlatform()
+    filter { includeTestsMatching(ALLOCATION_TEST) }
+    testLogging { showStandardStreams = true }
+}
+
+tasks.named("check") { dependsOn(jvmAllocationTest) }
 
 tasks.register("benchClasspath") {
     group = "verification"
