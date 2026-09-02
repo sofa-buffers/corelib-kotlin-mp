@@ -203,7 +203,8 @@ sequence trio, plus `flush()`, `bufferSet(buffer, offset)`, `reset(buffer)` and
 `IStream()` holds the decode state: `feed(data, visitor)` or
 `feed(data, off, len, visitor)`, the `status` property (`COMPLETE` / `INCOMPLETE` /
 `INVALID`), and `reset()` to start the next message — which is also the only way
-out of a latched `INVALID`.
+out of a latched terminal verdict (`INVALID_MSG`, a `LIMIT_EXCEEDED` receiver-limit
+stop, or an `ARGUMENT` destination refusal).
 
 ### Generated objects
 

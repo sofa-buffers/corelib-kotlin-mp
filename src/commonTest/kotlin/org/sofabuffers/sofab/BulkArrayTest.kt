@@ -122,6 +122,184 @@ class BulkArrayTest {
         assertEquals(3, exact.ended)
     }
 
+    /**
+     * Records every field the decoder actually delivered, in order, so a test can
+     * assert on the *events* and not only on [IStream.status].
+     */
+    private class Recording(private val dst: Any?) : Visitor {
+        val events: MutableList<String> = mutableListOf()
+        var offers = 0
+
+        override fun arrayBulk(id: Int, kind: ArrayKind, count: Int): Any? {
+            offers++
+            return dst
+        }
+
+        override fun arrayBulkEnd(id: Int, n: Int) {
+            events.add("bulkEnd:$id:$n")
+        }
+
+        override fun arrayBegin(id: Int, kind: ArrayKind, count: Int) {
+            events.add("arr:$id:$kind:$count")
+        }
+
+        override fun unsigned(id: Int, value: Long) {
+            events.add("u:$id:${value.toULong()}")
+        }
+
+        override fun signed(id: Int, value: Long) {
+            events.add("s:$id:$value")
+        }
+
+        override fun sequenceBegin(id: Int) {
+            events.add("seq{:$id")
+        }
+
+        override fun sequenceEnd() {
+            events.add("seq}")
+        }
+    }
+
+    /**
+     * Finding CORELIB_KOTLIN_MP-01 — a destination-too-short refusal must latch.
+     *
+     * §6.3 lists the refusal itself as the third tier — *"broke neither, but does
+     * not fit the destination the caller handed over (§6.6.3) | the codec |
+     * `InvalidArgument`"* — and the sibling `LimitExceeded` tier as *"a terminal,
+     * receiver-local policy rejection"* that *"terminates a decode on well-formed
+     * input"*. This refusal is terminal in exactly the same way: the offer site has
+     * been passed, the destination cannot be re-offered, and the array's elements
+     * were never consumed. §5.2.1 then forbids the outcome the port leaves behind
+     * — the consumed bytes do **not** end at a field boundary, so answering
+     * `COMPLETE` is precisely the *"folding into `COMPLETE`"* it calls
+     * non-conformant. §7.2 item 4 requires the byte-at-a-time path to agree with
+     * the whole-input path on identical bytes.
+     *
+     * The array's elements are chosen so that, read as top-level field headers,
+     * they form two well-formed unsigned fields (`08 2a` -> id 1 = 42, `10 63` ->
+     * id 2 = 99). Nothing on the wire ever declared those fields: they exist only
+     * if an unlatched decoder re-enters header parsing at the desynchronised
+     * position the refusal left behind.
+     */
+    @Test
+    fun corelibKotlinMp01ARefusedBulkDestinationLatchesAndInventsNoFields() {
+        val wire = encode(256) { it.writeArrayUnsigned(1, longArrayOf(8, 42, 16, 99)) }
+        // 0b = (1 << 3) | T_VARINTARRAY_UNSIGNED, 04 = count, then the four elements.
+        assertEquals("0b04082a1063", hex(wire), "the bytes this finding is about")
+        val elements = wire.copyOfRange(2, wire.size)
+
+        // --- fed whole -------------------------------------------------------
+        val whole = Recording(LongArray(2)) // two slots for the four the wire announces
+        val input = IStream()
+        val refused = assertFailsWith<SofabException> { input.feed(wire, whole) }
+        assertEquals(SofabError.ARGUMENT, refused.error, "§6.3's third refusal tier")
+
+        // (a) the verdict is terminal, and it is not COMPLETE: not one element was
+        // decoded, so the consumed bytes do not end at a field boundary. INVALID is
+        // equally wrong (the bytes are well-formed and a longer destination decodes
+        // them), which leaves INCOMPLETE — the same answer the port already gives
+        // for the LIMIT_EXCEEDED tier.
+        assertTrue(
+            input.status != DecodeStatus.COMPLETE,
+            "a decode abandoned before its first element is not COMPLETE",
+        )
+        assertTrue(input.status != DecodeStatus.INVALID, "a §6.6.3 refusal is not a wire verdict")
+        assertEquals(DecodeStatus.INCOMPLETE, input.status, "the message was abandoned, not completed")
+
+        // The verdict the refusal left behind, captured here — after the refusal and
+        // before the reset() further down clears it — because §7.2 item 4 compares
+        // *this* against the byte-at-a-time decoder's own post-refusal verdict.
+        val wholeStatus = input.status
+
+        // (b) a further feed does not resume. These are the very bytes the refusal
+        // skipped, arriving as the caller's next chunk; a latched decoder re-reports
+        // the terminal verdict instead of parsing them.
+        val again = assertFailsWith<SofabException> { input.feed(elements, whole) }
+        assertEquals(SofabError.ARGUMENT, again.error, "the latched verdict is re-reported")
+        assertEquals(1, whole.offers, "a latched stream makes no further bulk offer")
+        assertEquals(DecodeStatus.INCOMPLETE, input.status, "and the verdict does not drift")
+
+        // (c) no field the sender never wrote reached the visitor. The array header
+        // was announced; nothing else was ever on the wire.
+        assertEquals(
+            listOf("arr:1:UNSIGNED:4"),
+            whole.events,
+            "the refused payload's own bytes must never surface as fields",
+        )
+
+        // reset() is the only way out, exactly as for the other two terminal codes.
+        input.reset()
+        assertEquals(DecodeStatus.COMPLETE, input.status)
+
+        // --- fed one byte at a time (§7.2 item 4: identical result) -----------
+        val chunked = Recording(LongArray(2))
+        val stream = IStream()
+        var thrown: SofabException? = null
+        var i = 0
+        while (i < wire.size) {
+            try {
+                stream.feed(wire, i, 1, chunked)
+            } catch (e: SofabException) {
+                thrown = e
+                break
+            }
+            i++
+        }
+        assertEquals(SofabError.ARGUMENT, thrown?.error, "the same bytes refuse the same way")
+        assertEquals(wholeStatus, stream.status, "whole-input and byte-at-a-time must agree")
+        assertEquals(DecodeStatus.INCOMPLETE, stream.status)
+        assertEquals(whole.events, chunked.events, "and must deliver the same events")
+
+        // The same continuation, on the resumable path: still terminal, still silent.
+        val resumed = assertFailsWith<SofabException> { stream.feed(elements, chunked) }
+        assertEquals(SofabError.ARGUMENT, resumed.error)
+        assertEquals(1, chunked.offers, "a latched stream makes no further bulk offer")
+        assertEquals(listOf("arr:1:UNSIGNED:4"), chunked.events)
+
+        // The control: the identical bytes against a destination that fits decode
+        // cleanly, which is what makes the refusal a property of the call and not
+        // of the message.
+        val fits = Recording(LongArray(4))
+        val ok = IStream()
+        ok.feed(wire, fits)
+        assertEquals(listOf("arr:1:UNSIGNED:4", "bulkEnd:1:4"), fits.events)
+        assertEquals(DecodeStatus.COMPLETE, ok.status)
+    }
+
+    /**
+     * The other half of CORELIB_KOTLIN_MP-01: the latch keys on the refusal
+     * **site**, not on the error code.
+     *
+     * §6.3 makes `InvalidArgument` the catch-all for every caller mistake — an id
+     * out of range, a bad scalar width, invalid UTF-8 — so a visitor raising it
+     * from inside its own callback, for a reason of its own, says nothing about the
+     * decode. Latching on the code would strand a caller whose message was
+     * well-formed and whose destinations all fitted. Only [IStream.requireRoom]'s
+     * §6.6.3 refusal is a decode verdict, and §5.3.1 wants that rule implemented in
+     * exactly one place — which is where the flag is set.
+     */
+    @Test
+    fun corelibKotlinMp01BVisitorsOwnArgumentErrorDoesNotLatchTheDecoder() {
+        val first = encode(64) { it.writeUnsigned(1, 42) }
+        val second = encode(64) { it.writeUnsigned(2, 99) }
+
+        val thrower = object : Visitor {
+            override fun unsigned(id: Int, value: Long) {
+                throw SofabException(SofabError.ARGUMENT, "the caller's own complaint, not the codec's")
+            }
+        }
+        val input = IStream()
+        val raised = assertFailsWith<SofabException> { input.feed(first, thrower) }
+        assertEquals(SofabError.ARGUMENT, raised.error)
+
+        // Nothing the codec refused, so nothing is latched: the next message is
+        // decoded, not answered with the terminal verdict.
+        val seen = Recording(null)
+        input.feed(second, seen)
+        assertEquals(listOf("u:2:99"), seen.events, "a visitor's own error must not strand the decoder")
+        assertEquals(DecodeStatus.COMPLETE, input.status)
+    }
+
     @Test
     fun theOfferIsNotMadeForAnEmptyOrFloatArray() {
         var offers = 0

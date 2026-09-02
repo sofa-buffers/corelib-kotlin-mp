@@ -203,6 +203,33 @@ public class IStream {
     private var limitStopped = false
 
     /**
+     * Latched destination refusal: a bulk array destination the caller handed over
+     * that is shorter than the announced count — CORELIB_PLAN §6.6.3's third
+     * refusal tier, which §6.3 names `InvalidArgument`. It is terminal for *this*
+     * decode exactly as the other two are: the offer site has been passed, the
+     * destination cannot be re-offered, the field's payload was never consumed, and
+     * the parse position the decoder held is meaningless afterwards — so a further
+     * `feed` would re-enter header parsing at a desynchronised byte and hand the
+     * refused payload's own bytes to the visitor as fields that were never on the
+     * wire.
+     *
+     * Set at the **refusal site** ([requireRoom]), not from [feed]'s catch on the
+     * error code. `ARGUMENT` is §6.3's general "the call was wrong" code — an out of
+     * range field id, a bad length, invalid UTF-8 — so a visitor callback raising it
+     * for a reason of its own is not this refusal, and latching the decoder on it
+     * would punish a caller whose message decoded fine. The site is what makes it a
+     * decode verdict; the code alone does not.
+     *
+     * A **separate** latch for the same reason [limitStopped] is separate: the bytes
+     * are well-formed, so folding this into [invalid] would call good bytes
+     * malformed, and folding it into [limitStopped] would promise a limit to raise
+     * that nobody configured. [status] answers [DecodeStatus.INCOMPLETE] — never
+     * [DecodeStatus.COMPLETE] — for a message this decoder abandoned, which is also
+     * what makes the fast and resumable paths agree on identical bytes (§7.2).
+     */
+    private var argRefused = false
+
+    /**
      * Position just past the word most recently read by [readWord], or `-1` when
      * that word ran past the end of the supplied bytes.
      */
@@ -230,8 +257,9 @@ public class IStream {
      * onto the next message, and the *only* way: that outcome is terminal
      * (CORELIB_PLAN §5.2), so until this call [status] keeps answering
      * [DecodeStatus.INVALID] and [feed] keeps refusing bytes. A
-     * [SofabError.LIMIT_EXCEEDED] stop (§6.2.1, §6.3) clears here too, and it is
-     * likewise the only way to clear it.
+     * [SofabError.LIMIT_EXCEEDED] stop (§6.2.1, §6.3) clears here too, as does a
+     * [SofabError.ARGUMENT] destination refusal (§6.6.3), and it is likewise the
+     * only way to clear either.
      *
      * [acc] is construction-sized state and is not reallocated: only its first
      * [accLen] bytes are ever read, and that counter is zeroed here.
@@ -259,6 +287,7 @@ public class IStream {
         depth = 0
         invalid = false
         limitStopped = false
+        argRefused = false
         machineBytes = 0
         // Pure scratch — every path writes it before it reads it — but cleared
         // anyway so "reset restores every declared field" needs no exception.
@@ -272,6 +301,10 @@ public class IStream {
      * ended inside a field — a partial varint (field header or value), a
      * fixlen/array payload shorter than declared, an array with elements still
      * pending — or with an open (unclosed) nested sequence.
+     *
+     * A decode stopped by a receiver limit or by a refused destination answers
+     * [DecodeStatus.INCOMPLETE] and keeps answering it: those bytes are well-formed,
+     * but the message was abandoned part-way through a field.
      *
      * A *malformed* message answers [DecodeStatus.INVALID], which outranks both
      * other outcomes and is **terminal** (CORELIB_PLAN §5.2): [feed] threw when it
@@ -299,6 +332,20 @@ public class IStream {
             // where state and depth are untouched and COMPLETE would otherwise be
             // reported for a message whose payload was never consumed.
             if (limitStopped) {
+                return DecodeStatus.INCOMPLETE
+            }
+            // A destination refusal (§6.6.3, §6.3's `InvalidArgument`) is terminal in
+            // the same way and equally not a verdict on the bytes: the same message
+            // decodes for a caller who hands over storage that fits. It reaches the
+            // caller as SofabError.ARGUMENT on the error channel; here it is
+            // INCOMPLETE, because the decoder abandoned the message part-way through
+            // a field whose payload it never consumed. Reporting COMPLETE is the
+            // "folding into COMPLETE" §5.2.1 calls non-conformant, and it is what the
+            // fast path would otherwise do: it refuses at a clean field boundary,
+            // with state and depth untouched, while the resumable path refuses from
+            // S_ARRAY_COUNT and would answer INCOMPLETE — two outcomes for the same
+            // bytes, which §7.2 forbids.
+            if (argRefused) {
                 return DecodeStatus.INCOMPLETE
             }
             // COMPLETE only at a true field boundary: no partial field header varint
@@ -338,16 +385,25 @@ public class IStream {
      * [DecodeStatus.COMPLETE] for a message this decoder abandoned. It is never
      * folded into [DecodeStatus.INVALID], because the bytes are well-formed.
      *
+     * A bulk destination this decoder itself refused as too short for the announced
+     * count (§6.6.3, [requireRoom]) is terminal and latches the same way, on its own
+     * flag: the field's payload was never consumed, so there is no position to
+     * resume from, and continuing would read the refused payload's bytes as field
+     * headers. Further feeds throw [SofabError.ARGUMENT] and [status] reports
+     * [DecodeStatus.INCOMPLETE]. A [SofabError.ARGUMENT] a *visitor* raises for its
+     * own reasons is not that verdict and latches nothing.
+     *
      * @param data backing array
      * @param off start offset
      * @param len number of bytes to consume
      * @param visitor sink for decoded fields
      * @throws SofabException [SofabError.INVALID_MSG] on malformed input, or on any
      *   call after malformed input was already rejected; [SofabError.LIMIT_EXCEEDED]
-     *   on any call after a receiver limit stopped the decode
+     *   on any call after a receiver limit stopped the decode; [SofabError.ARGUMENT]
+     *   on any call after a refused destination stopped it
      */
     public fun feed(data: ByteArray, off: Int, len: Int, visitor: Visitor) {
-        if (invalid || limitStopped) {
+        if (invalid || limitStopped || argRefused) {
             throwLatched()
         }
         try {
@@ -359,7 +415,12 @@ public class IStream {
             // inside a Visitor callback — is terminal, and this is the one place all
             // of them pass through. LIMIT_EXCEEDED is terminal too (§6.3) but is a
             // policy rejection of well-formed bytes, so it latches *separately*:
-            // §6.2.1 forbids folding it into the INVALID outcome.
+            // §6.2.1 forbids folding it into the INVALID outcome. The §6.6.3
+            // destination refusal is terminal too, but it does *not* latch here:
+            // ARGUMENT is also §6.3's general caller-mistake code, so it is latched
+            // at its refusal site ([requireRoom]) instead — see [argRefused].
+            // Anything else that reaches here is not a decode verdict and latches
+            // nothing.
             when (e.error) {
                 SofabError.INVALID_MSG -> invalid = true
                 SofabError.LIMIT_EXCEEDED -> limitStopped = true
@@ -381,10 +442,15 @@ public class IStream {
                 SofabError.INVALID_MSG,
                 "decode already INVALID; reset() to start a new message",
             )
-        } else {
+        } else if (limitStopped) {
             throw SofabException(
                 SofabError.LIMIT_EXCEEDED,
                 "decode already stopped by a receiver limit; reset() to start a new message",
+            )
+        } else {
+            throw SofabException(
+                SofabError.ARGUMENT,
+                "decode already stopped by a refused destination; reset() to start a new message",
             )
         }
 
@@ -1129,6 +1195,11 @@ public class IStream {
      */
     private fun requireRoom(size: Int, c: Int) {
         if (size < c) {
+            // Terminal for this decode, and latched here rather than from [feed]'s
+            // catch: this site — not the ARGUMENT code, which any visitor may raise
+            // for its own reasons — is what makes it a decode verdict. See
+            // [argRefused].
+            argRefused = true
             throw SofabException(
                 SofabError.ARGUMENT,
                 "bulk destination holds $size elements, the array announced $c",
