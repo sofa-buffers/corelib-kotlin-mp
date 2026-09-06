@@ -391,6 +391,18 @@ message itself and asserts the resulting container length and outcome. The struc
 cases run through `Seq.reserveRowList`, which is where the element index meets the
 receiver cap.
 
+`HeaderLimitsTest` runs the file's fourth block, the header-ceiling cases
+(CORELIB_PLAN §6.2.1 / §6.3). Each is a header that *declares* a length or count
+and then ends, with no payload behind it: the ceiling is decided at that word, so
+the answer is the ceiling's and it is terminal — a further feed re-raises rather
+than consuming. Which ceiling speaks is the subject, and the two give opposite
+answers on the same bytes: a schema `maxlen` makes them `INVALID_MSG`, a receiver
+cap makes them `LIMIT_EXCEEDED`. The reader applies the case's ceiling at
+`Visitor.fixlenBegin` through `PayloadAcc.checkStringLength` /
+`checkBlobLength`, as generated code does. Every rejection is paired with an
+in-cap control, which is carried through to `COMPLETE` so the block cannot be
+passed by rejecting every short read.
+
 Most of the suite is in `commonTest`, so it runs unchanged on every target — the JS
 and native legs are what prove the portable little-endian path produces the JVM's
 bytes. Only the vector- and benchmark-driven tests are JVM-only, because they read

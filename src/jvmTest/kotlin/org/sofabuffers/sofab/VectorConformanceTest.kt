@@ -334,9 +334,11 @@ class VectorConformanceTest {
     }
 
     /**
-     * The vector file carries blocks beside `vectors` — `invalid_utf8`, and
+     * The vector file carries blocks beside `vectors` — `invalid_utf8`;
      * `sequence_growth`, whose cases are keyed by a delivery order of element ids
-     * rather than by bytes and are run by [SequenceGrowthTest] (§7.2 item 8). Every
+     * rather than by bytes and are run by [SequenceGrowthTest] (§7.2 item 8); and
+     * `header_limits`, whose cases are keyed by a header that declares a length or
+     * count and then ends, and are run by [HeaderLimitsTest] (§6.2.1, §6.3). Every
      * block this port runs must be present, and a block it does not run must be
      * ignored rather than fail or warn, which is what keeps this repo able to adopt
      * the shared file verbatim (§7.1).
@@ -344,13 +346,14 @@ class VectorConformanceTest {
     @Test
     fun everyBlockThisPortRunsIsPresentAndOthersAreTolerated() {
         assertEquals("sofabuffers-test-vectors", Vectors.format, "the loader read the shared file")
-        val run = setOf("vectors", "invalid_utf8", "sequence_growth")
+        val run = setOf("vectors", "invalid_utf8", "sequence_growth", "header_limits")
         assertTrue(Vectors.blocks.containsAll(run), "the blocks this port runs are all present")
         val notRun = Vectors.blocks - setOf("format", "version", "description", "notes") - run
         println("[test-vectors] top-level blocks present but not run here: ${notRun.ifEmpty { setOf("none") }}")
         assertTrue(vectors.isNotEmpty(), "the vectors block loaded")
         assertTrue(invalidUtf8.isNotEmpty(), "the invalid_utf8 block loaded")
         assertTrue(Vectors.sequenceGrowth.isNotEmpty(), "the sequence_growth block loaded")
+        assertTrue(Vectors.headerLimits.isNotEmpty(), "the header_limits block loaded")
     }
 
     // --- negative vectors: invalid UTF-8 (CORELIB_PLAN §6.4) -----------------
@@ -703,6 +706,17 @@ internal object Vectors {
      * vector and are read as raw objects where they are replayed.
      */
     val sequenceGrowth: List<JsonObject> = root["sequence_growth"]?.jsonArray.orEmpty().map { it.jsonObject }
+
+    /**
+     * The header-ceiling cases of CORELIB_PLAN §6.2.1 / §6.3, run by
+     * [HeaderLimitsTest].
+     *
+     * Keyed by a **partial** byte string — a header that declares a length or count
+     * and then ends — plus the ceiling to configure for the case and the verdict it
+     * must produce. A vector carries no verdict field at all, which is why these
+     * cannot be vectors; they are read as raw objects where they are replayed.
+     */
+    val headerLimits: List<JsonObject> = root["header_limits"]?.jsonArray.orEmpty().map { it.jsonObject }
 
     /** The file's `format` tag, as read. */
     val format: String = root.str("format")
