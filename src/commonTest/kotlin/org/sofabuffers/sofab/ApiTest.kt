@@ -51,10 +51,9 @@ class ApiTest {
     fun aFreshDecoderIsComplete() {
         // The empty message is valid and denotes the all-default value
         // (MESSAGE_SPEC §2), so a decoder that has seen nothing is COMPLETE.
-        val input = IStream()
-        assertEquals(DecodeStatus.COMPLETE, input.status)
-        input.feed(ByteArray(0), RecordingVisitor())
-        assertEquals(DecodeStatus.COMPLETE, input.status)
+        // Feeding nothing is how a decoder is asked, now that `feed` is the only
+        // answer — and an empty chunk is the empty message.
+        assertEquals(DecodeStatus.COMPLETE, IStream().feed(ByteArray(0), RecordingVisitor()))
     }
 
     @Test

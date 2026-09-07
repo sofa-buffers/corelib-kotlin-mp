@@ -159,9 +159,13 @@ internal fun decodeEventsChunked(wire: ByteArray, chunk: Int): List<String> {
     return v.events
 }
 
-/** Feed [wire] whole and return the decoder, so a test can read its [IStream.status]. */
+/** Feed [wire] whole and return the decoder, for a test that continues feeding it. */
 internal fun feedAll(wire: ByteArray, visitor: Visitor = RecordingVisitor()): IStream {
     val input = IStream()
     input.feed(wire, visitor)
     return input
 }
+
+/** Feed [wire] whole and return what [IStream.feed] answered for it. */
+internal fun outcomeOf(wire: ByteArray, visitor: Visitor = RecordingVisitor()): DecodeStatus =
+    IStream().feed(wire, visitor)

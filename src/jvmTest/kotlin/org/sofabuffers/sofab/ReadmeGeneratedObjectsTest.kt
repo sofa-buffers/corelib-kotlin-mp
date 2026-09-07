@@ -51,11 +51,7 @@ class ReadmeGeneratedObjectsTest {
         private val istream = IStream()
         private val nameBytes = PayloadAcc()
 
-        val status: DecodeStatus get() = istream.status
-
-        fun feed(chunk: ByteArray) {
-            istream.feed(chunk, this)
-        }
+        fun feed(chunk: ByteArray): DecodeStatus = istream.feed(chunk, this)
 
         override fun unsigned(id: Int, value: Long) {
             if (id == 2) this.value.age = value
@@ -121,9 +117,10 @@ class ReadmeGeneratedObjectsTest {
         val bytes = Person().apply { name = "Ada"; age = 36 }.encode()
 
         val dec = Person.decoder()
-        for (b in bytes) dec.feed(byteArrayOf(b))
+        var last = DecodeStatus.INCOMPLETE
+        for (b in bytes) last = dec.feed(byteArrayOf(b))
 
-        assertEquals(DecodeStatus.COMPLETE, dec.status)
+        assertEquals(DecodeStatus.COMPLETE, last)
         assertEquals("Ada", dec.value.name)
         assertEquals(36L, dec.value.age)
     }

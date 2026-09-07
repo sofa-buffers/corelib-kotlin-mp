@@ -79,7 +79,6 @@ class BulkArrayTest {
             val input = IStream()
             val e = assertFailsWith<SofabException> { input.feed(wire, Bulk(dst)) }
             assertEquals(SofabError.INVALID_MSG, e.error)
-            assertEquals(DecodeStatus.INVALID, input.status)
         }
         // The signed side tests the same statement from the other direction.
         val signed = encode(256) { it.writeArraySigned(1, longArrayOf(-1, Int.MIN_VALUE.toLong() - 1)) }
@@ -124,7 +123,7 @@ class BulkArrayTest {
 
     /**
      * Records every field the decoder actually delivered, in order, so a test can
-     * assert on the *events* and not only on [IStream.status].
+     * assert on the *events* and not only on what `feed` returned.
      */
     private class Recording(private val dst: Any?) : Visitor {
         val events: MutableList<String> = mutableListOf()
@@ -194,22 +193,16 @@ class BulkArrayTest {
         val refused = assertFailsWith<SofabException> { input.feed(wire, whole) }
         assertEquals(SofabError.ARGUMENT, refused.error, "§6.3's third refusal tier")
 
-        // (a) the verdict is terminal, and it is not COMPLETE: not one element was
-        // decoded, so the consumed bytes do not end at a field boundary. INVALID is
-        // equally wrong (the bytes are well-formed and a longer destination decodes
-        // them), which leaves INCOMPLETE — the same answer the port already gives
-        // for the LIMIT_EXCEEDED tier.
-        assertTrue(
-            input.status != DecodeStatus.COMPLETE,
-            "a decode abandoned before its first element is not COMPLETE",
-        )
-        assertTrue(input.status != DecodeStatus.INVALID, "a §6.6.3 refusal is not a wire verdict")
-        assertEquals(DecodeStatus.INCOMPLETE, input.status, "the message was abandoned, not completed")
+        // (a) the verdict is terminal, and no outcome is returned for it at all.
+        // Not one element was decoded, so the consumed bytes do not end at a field
+        // boundary; COMPLETE was the answer to rule out, and `feed` cannot give it
+        // because it threw. INVALID would be equally wrong — the bytes are
+        // well-formed and a longer destination decodes them — which is why the code
+        // is ARGUMENT and travels on the error channel (§6.3), asserted above.
 
-        // The verdict the refusal left behind, captured here — after the refusal and
-        // before the reset() further down clears it — because §7.2 item 4 compares
-        // *this* against the byte-at-a-time decoder's own post-refusal verdict.
-        val wholeStatus = input.status
+        // The category the refusal left behind, captured here because §7.2 item 4
+        // compares *this* against what the byte-at-a-time decoder answers.
+        val wholeError = refused.error
 
         // (b) a further feed does not resume. These are the very bytes the refusal
         // skipped, arriving as the caller's next chunk; a latched decoder re-reports
@@ -217,7 +210,6 @@ class BulkArrayTest {
         val again = assertFailsWith<SofabException> { input.feed(elements, whole) }
         assertEquals(SofabError.ARGUMENT, again.error, "the latched verdict is re-reported")
         assertEquals(1, whole.offers, "a latched stream makes no further bulk offer")
-        assertEquals(DecodeStatus.INCOMPLETE, input.status, "and the verdict does not drift")
 
         // (c) no field the sender never wrote reached the visitor. The array header
         // was announced; nothing else was ever on the wire.
@@ -229,7 +221,7 @@ class BulkArrayTest {
 
         // reset() is the only way out, exactly as for the other two terminal codes.
         input.reset()
-        assertEquals(DecodeStatus.COMPLETE, input.status)
+        assertEquals(DecodeStatus.COMPLETE, input.feed(ByteArray(0), whole))
 
         // --- fed one byte at a time (§7.2 item 4: identical result) -----------
         val chunked = Recording(LongArray(2))
@@ -246,8 +238,7 @@ class BulkArrayTest {
             i++
         }
         assertEquals(SofabError.ARGUMENT, thrown?.error, "the same bytes refuse the same way")
-        assertEquals(wholeStatus, stream.status, "whole-input and byte-at-a-time must agree")
-        assertEquals(DecodeStatus.INCOMPLETE, stream.status)
+        assertEquals(wholeError, thrown?.error, "whole-input and byte-at-a-time must agree")
         assertEquals(whole.events, chunked.events, "and must deliver the same events")
 
         // The same continuation, on the resumable path: still terminal, still silent.
@@ -261,9 +252,8 @@ class BulkArrayTest {
         // of the message.
         val fits = Recording(LongArray(4))
         val ok = IStream()
-        ok.feed(wire, fits)
+        assertEquals(DecodeStatus.COMPLETE, ok.feed(wire, fits))
         assertEquals(listOf("arr:1:UNSIGNED:4", "bulkEnd:1:4"), fits.events)
-        assertEquals(DecodeStatus.COMPLETE, ok.status)
     }
 
     /**
@@ -295,9 +285,8 @@ class BulkArrayTest {
         // Nothing the codec refused, so nothing is latched: the next message is
         // decoded, not answered with the terminal verdict.
         val seen = Recording(null)
-        input.feed(second, seen)
+        assertEquals(DecodeStatus.COMPLETE, input.feed(second, seen))
         assertEquals(listOf("u:2:99"), seen.events, "a visitor's own error must not strand the decoder")
-        assertEquals(DecodeStatus.COMPLETE, input.status)
     }
 
     @Test
@@ -324,15 +313,16 @@ class BulkArrayTest {
             val v = Bulk(dst)
             val input = IStream()
             var i = 0
+            var last = DecodeStatus.INCOMPLETE
             while (i < wire.size) {
                 val n = minOf(chunk, wire.size - i)
-                input.feed(wire, i, n, v)
+                last = input.feed(wire, i, n, v)
                 i += n
             }
             assertContentEquals(src, dst, "chunk $chunk")
             assertEquals(src.size, v.ended, "chunk $chunk")
             assertTrue(v.perElement.isEmpty(), "chunk $chunk")
-            assertEquals(DecodeStatus.COMPLETE, input.status)
+            assertEquals(DecodeStatus.COMPLETE, last, "chunk $chunk")
         }
     }
 

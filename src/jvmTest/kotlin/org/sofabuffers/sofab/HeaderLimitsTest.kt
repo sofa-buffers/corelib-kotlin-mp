@@ -266,8 +266,10 @@ class HeaderLimitsTest {
         return parts.map { unhex(it) }
     }
 
-    private fun feed(stream: IStream, dest: HeaderDest, parts: List<ByteArray>) {
-        for (part in parts) stream.feed(part, dest)
+    private fun feed(stream: IStream, dest: HeaderDest, parts: List<ByteArray>): DecodeStatus {
+        var last = DecodeStatus.INCOMPLETE
+        for (part in parts) last = stream.feed(part, dest)
+        return last
     }
 
     /**
@@ -320,13 +322,15 @@ class HeaderLimitsTest {
             when (outcome) {
                 "incomplete" -> {
                     assertNull(expect["terminal"], "$name: `terminal` on an incomplete case")
-                    feed(stream, dest, parts)
-                    assertEquals(DecodeStatus.INCOMPLETE, stream.status, "$name: status")
+                    assertEquals(DecodeStatus.INCOMPLETE, feed(stream, dest, parts), "$name: outcome")
                     assertHeaderRead(name, case, dest, declared)
                     // The control's whole point: the ceiling admits this length, so
                     // the payload still decodes and the message completes.
-                    stream.feed(payloadFor(dest, declared.toInt()), dest)
-                    assertEquals(DecodeStatus.COMPLETE, stream.status, "$name: the admitted payload completes")
+                    assertEquals(
+                        DecodeStatus.COMPLETE,
+                        stream.feed(payloadFor(dest, declared.toInt()), dest),
+                        "$name: the admitted payload completes",
+                    )
                 }
                 "limit_exceeded" -> {
                     // A policy rejection of well-formed bytes, never folded into the
@@ -340,9 +344,9 @@ class HeaderLimitsTest {
                     // §6.3 forbids the two other readings: INVALID would call
                     // well-formed bytes malformed, COMPLETE would report a message
                     // this decoder abandoned. The verdict itself rides the error
-                    // channel, which is where the caller reads the category.
-                    assertTrue(stream.status != DecodeStatus.INVALID, "$name: status is not INVALID")
-                    assertTrue(stream.status != DecodeStatus.COMPLETE, "$name: status is not COMPLETE")
+                    // channel, which is where the caller reads the category — and
+                    // the only place it can be read, since `feed` threw and returned
+                    // no outcome at all.
                     if (terminal) assertTerminal(name, stream, dest, SofabError.LIMIT_EXCEEDED)
                 }
                 "invalid" -> {
@@ -354,7 +358,6 @@ class HeaderLimitsTest {
                     }
                     assertEquals(SofabError.INVALID_MSG, thrown.error, "$name: error category")
                     assertHeaderRead(name, case, dest, declared)
-                    assertEquals(DecodeStatus.INVALID, stream.status, "$name: status")
                     if (terminal) assertTerminal(name, stream, dest, SofabError.INVALID_MSG)
                 }
                 else -> error("$name: unknown expected outcome $outcome")
@@ -430,8 +433,11 @@ class HeaderLimitsTest {
                 assertEquals(SofabError.INVALID_MSG, thrown.error, "$name: error category, caps lifted")
                 keptTheirVerdict++
             } else {
-                feed(stream, dest, chunksOf(case))
-                assertEquals(DecodeStatus.INCOMPLETE, stream.status, "$name: status with the cap lifted")
+                assertEquals(
+                    DecodeStatus.INCOMPLETE,
+                    feed(stream, dest, chunksOf(case)),
+                    "$name: outcome with the cap lifted",
+                )
                 fellBack++
             }
         }

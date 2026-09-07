@@ -42,8 +42,9 @@ class Fp32BitExactTest {
     private fun feedByteAtATime(wire: ByteArray): List<Int> {
         val v = Bits()
         val input = IStream()
-        for (i in wire.indices) input.feed(wire, i, 1, v)
-        assertEquals(DecodeStatus.COMPLETE, input.status)
+        var last = DecodeStatus.INCOMPLETE
+        for (i in wire.indices) last = input.feed(wire, i, 1, v)
+        assertEquals(DecodeStatus.COMPLETE, last)
         return v.seen
     }
 

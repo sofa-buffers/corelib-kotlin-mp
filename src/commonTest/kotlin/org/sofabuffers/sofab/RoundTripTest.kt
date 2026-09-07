@@ -57,8 +57,7 @@ class RoundTripTest {
     fun oneShotRoundTrip() {
         val wire = encode(512) { composite(it) }
         val v = RecordingVisitor()
-        val input = feedAll(wire, v)
-        assertEquals(DecodeStatus.COMPLETE, input.status)
+        assertEquals(DecodeStatus.COMPLETE, outcomeOf(wire, v))
         assertEquals(expected, v.events)
     }
 
@@ -166,8 +165,7 @@ class SkipTest {
         val wire = encode(512) { message(it) }
         val v = Skipping(setOf(2, 3, 4))
         val input = IStream()
-        input.feed(wire, v)
-        assertEquals(DecodeStatus.COMPLETE, input.status, "the message is still fully consumed")
+        assertEquals(DecodeStatus.COMPLETE, input.feed(wire, v), "the message is still fully consumed")
         assertEquals(listOf("u:1:1", "s:5:-7"), v.out.events)
     }
 
@@ -178,12 +176,13 @@ class SkipTest {
             val v = Skipping(setOf(2, 3, 4))
             val input = IStream()
             var i = 0
+            var last = DecodeStatus.INCOMPLETE
             while (i < wire.size) {
                 val n = minOf(chunk, wire.size - i)
-                input.feed(wire, i, n, v)
+                last = input.feed(wire, i, n, v)
                 i += n
             }
-            assertEquals(DecodeStatus.COMPLETE, input.status, "chunk $chunk")
+            assertEquals(DecodeStatus.COMPLETE, last, "chunk $chunk")
             assertEquals(listOf("u:1:1", "s:5:-7"), v.out.events, "chunk $chunk")
         }
     }
@@ -194,8 +193,7 @@ class SkipTest {
         // has to consume every header, count and payload length.
         val wire = encode(512) { message(it) }
         val input = IStream()
-        input.feed(wire, object : Visitor {})
-        assertEquals(DecodeStatus.COMPLETE, input.status)
+        assertEquals(DecodeStatus.COMPLETE, input.feed(wire, object : Visitor {}))
         assertTrue(wire.isNotEmpty())
     }
 }
