@@ -308,7 +308,11 @@ class HeaderLimitsTest {
             val expect = case["expect"]!!.jsonObject
             val outcome = expect.str("outcome")
             val terminal = expect["terminal"]?.jsonPrimitive?.boolean == true
-            val declared = case.int("declared")
+            // A Long, not an Int: a case may declare a length ABOVE the format
+            // ceiling (§6.2), which is exactly what a header over `FIXLEN_MAX`
+            // looks like, and `toInt()` would throw NumberFormatException while
+            // parsing the block rather than letting the port answer.
+            val declared = case["declared"]!!.jsonPrimitive.content.toLong()
             val dest = HeaderDest(ceilingOf(case))
             val stream = IStream()
             val parts = chunksOf(case)
@@ -321,7 +325,7 @@ class HeaderLimitsTest {
                     assertHeaderRead(name, case, dest, declared)
                     // The control's whole point: the ceiling admits this length, so
                     // the payload still decodes and the message completes.
-                    stream.feed(payloadFor(dest, declared), dest)
+                    stream.feed(payloadFor(dest, declared.toInt()), dest)
                     assertEquals(DecodeStatus.COMPLETE, stream.status, "$name: the admitted payload completes")
                 }
                 "limit_exceeded" -> {
@@ -365,9 +369,15 @@ class HeaderLimitsTest {
      * The decoder announced the header the case describes — the number the ceiling
      * was compared against is the one on the wire, not something the reader supplied.
      */
-    private fun assertHeaderRead(name: String, case: JsonObject, dest: HeaderDest, declared: Int) {
+    private fun assertHeaderRead(name: String, case: JsonObject, dest: HeaderDest, declared: Long) {
         val announced = if (dest.subtype != null) dest.declaredLength else dest.declaredCount
-        assertEquals(declared, announced, "$name: the header the decoder announced")
+        // A header above the format ceiling is refused before any callback runs, so
+        // there is no announced number to compare — the outcome is the whole assertion.
+        if (declared > Int.MAX_VALUE.toLong()) {
+            assertEquals(-1, announced, "$name: a header above the format ceiling was announced anyway")
+            return
+        }
+        assertEquals(declared, announced.toLong(), "$name: the header the decoder announced")
         assertEquals(case.int("field_id"), fieldIdOf(dest), "$name: field id")
     }
 
@@ -507,5 +517,33 @@ class HeaderLimitsTest {
             val gated = "receiver_caps" in needs
             assertEquals(case["limits"] != null, gated, "${case.name()}: receiver_caps tag vs the ceiling it states")
         }
+    }
+
+    /**
+     * A length word that breaches BOTH ceilings at once: 3,000,000,000 bytes is
+     * above `FIXLEN_MAX` (2^31-1 — a format ceiling, whose breach is `INVALID` per
+     * MESSAGE_SPEC §5.2.2) and above any receiver cap a deployment would configure
+     * (whose breach is `LimitExceeded` per CORELIB_PLAN §6.2.1). The two carry
+     * different categories and the spec ranks neither, so this pins what this port
+     * actually does: the format ceiling is decided first and wins.
+     *
+     * It also guards the reader itself. `declared` is read as a Long precisely so a
+     * case like this parses; reading it as an Int threw NumberFormatException before
+     * a single byte was decoded, which would have looked like a broken block rather
+     * than a port that answers.
+     */
+    @Test
+    fun aFormatCeilingBreachOutranksAReceiverCapOnTheSameWord() {
+        // 02 = id 0, wire type 2 (fixlen); then (3_000_000_000 << 3) | 2 as a varint.
+        val bytes = byteArrayOf(0x02, 0x82.toByte(), 0xe0.toByte(), 0x8b.toByte(), 0xb4.toByte(), 0x59)
+        val dest = HeaderDest(Ceiling(NO_CAP_STATED, 16, NO_CAP_STATED, NO_CAP_STATED))
+        val stream = IStream()
+        val thrown = assertFailsWith<SofabException> { stream.feed(bytes, dest) }
+        assertEquals(
+            SofabError.INVALID_MSG,
+            thrown.error,
+            "a length above FIXLEN_MAX is malformed (§5.2.2); LimitExceeded would promise that a " +
+                "larger cap could accept these bytes, and none can",
+        )
     }
 }
