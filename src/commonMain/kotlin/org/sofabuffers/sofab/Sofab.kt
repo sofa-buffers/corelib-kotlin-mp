@@ -29,11 +29,19 @@ public object Sofab {
     /** Largest valid field id, `2^31 - 1` (`INT32_MAX`). */
     public const val ID_MAX: Int = Int.MAX_VALUE
 
-    /**
-     * Largest array element count / fixed-length byte count, `2^31 - 1`
-     * (`INT32_MAX`).
-     */
+    /** Largest array element count, `2^31 - 1` (`INT32_MAX`). */
     public const val ARRAY_MAX: Long = Int.MAX_VALUE.toLong()
+
+    /**
+     * Largest fixed-length byte count — a `string`, `blob` or fixlen array
+     * payload — `2^31 - 1` (`INT32_MAX`).
+     *
+     * The same number as [ARRAY_MAX] here, and a constant of its own because
+     * CORELIB_PLAN §6.2 states the two ceilings separately: a constrained profile
+     * may lower either without the other, and a caller that reads one where it
+     * means the other would be told the wrong number on such a build.
+     */
+    public const val FIXLEN_MAX: Long = Int.MAX_VALUE.toLong()
 
     /**
      * Smallest output buffer this port accepts **for streaming** (CORELIB_PLAN

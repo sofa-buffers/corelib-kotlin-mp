@@ -1646,7 +1646,7 @@ private fun checkFixlenWord(word: Long): Int {
     // The shift is unsigned, so a word with the top bits set yields a huge length
     // rather than a negative one, and the ceiling catches it.
     val length = word ushr 3
-    if (length > ARRAY_MAX) {
+    if (length > FIXLEN_MAX) {
         throw SofabException(SofabError.INVALID_MSG, "fixlen length $length")
     }
     return subtype

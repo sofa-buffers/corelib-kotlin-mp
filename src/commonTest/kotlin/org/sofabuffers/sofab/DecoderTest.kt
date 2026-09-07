@@ -85,14 +85,34 @@ class DecoderTest {
 
     @Test
     fun oversizedCountOrLengthIsInvalid() {
+        // Each ceiling is written as the constant it belongs to, not as the number
+        // the two happen to share: CORELIB_PLAN §6.2 states them separately and
+        // §6.2.2 lets a constrained profile lower either one alone, so a build that
+        // lowers one must see this test follow it rather than keep testing 2^31.
         val b = ByteArray(24)
-        var n = putVarint(b, 1, 2147483648L)
+        var n = putVarint(b, 1, Sofab.ARRAY_MAX + 1)
         b[0] = 0x03 // unsigned array header, id 0
         invalid(b.copyOf(n), "an array count above ARRAY_MAX")
 
-        n = putVarint(b, 1, (2147483648L shl 3) or F_BLOB.toLong())
+        n = putVarint(b, 1, ((Sofab.FIXLEN_MAX + 1) shl 3) or F_BLOB.toLong())
         b[0] = 0x02 // fixlen header, id 0
         invalid(b.copyOf(n), "a fixlen length above FIXLEN_MAX")
+    }
+
+    @Test
+    fun aCountOrLengthAtItsCeilingIsNotRefused() {
+        // The other side of the boundary, and the reason the ceilings are compared
+        // with `>` rather than `>=`: the largest legal value is legal. Nothing
+        // follows the header, so the verdict is INCOMPLETE — the ceiling stayed
+        // silent, and no allocation is implied by saying so (§5.2.1).
+        val b = ByteArray(24)
+        var n = putVarint(b, 1, Sofab.ARRAY_MAX)
+        b[0] = 0x03 // unsigned array header, id 0
+        incomplete(b.copyOf(n), "an array count exactly at ARRAY_MAX")
+
+        n = putVarint(b, 1, (Sofab.FIXLEN_MAX shl 3) or F_BLOB.toLong())
+        b[0] = 0x02 // fixlen header, id 0
+        incomplete(b.copyOf(n), "a fixlen length exactly at FIXLEN_MAX")
     }
 
     @Test
