@@ -25,7 +25,7 @@ public enum class DecodeStatus {
     /**
      * The bytes are malformed regardless of what follows. Surfaced as a thrown
      * [SofabException] with [SofabError.INVALID_MSG] and then latched:
-     * [IStream.status] reports it until [IStream.reset], and no continuation can
+     * the verdict is latched until [IStream.reset], and no continuation can
      * change it back.
      */
     INVALID,

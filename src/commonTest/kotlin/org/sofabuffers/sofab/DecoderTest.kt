@@ -21,13 +21,16 @@ class DecoderTest {
         val input = IStream()
         val e = assertFailsWith<SofabException>(why) { input.feed(wire, RecordingVisitor()) }
         assertEquals(SofabError.INVALID_MSG, e.error, why)
-        assertEquals(DecodeStatus.INVALID, input.status, "$why: the verdict must latch")
+        // The verdict latches, and feeding again is the only way to observe it now
+        // that `feed` is the single answer: a further call throws the same category
+        // without decoding, rather than an accessor reporting INVALID.
+        val latched = assertFailsWith<SofabException>(why) { input.feed(ByteArray(0), RecordingVisitor()) }
+        assertEquals(SofabError.INVALID_MSG, latched.error, "$why: the verdict must latch")
     }
 
     private fun incomplete(wire: ByteArray, why: String) {
         val input = IStream()
-        input.feed(wire, RecordingVisitor())
-        assertEquals(DecodeStatus.INCOMPLETE, input.status, why)
+        assertEquals(DecodeStatus.INCOMPLETE, input.feed(wire, RecordingVisitor()), why)
     }
 
     // --- malformed input (§7.2 kind 5) --------------------------------------
@@ -68,8 +71,7 @@ class DecoderTest {
         invalid(ByteArray(Sofab.MAX_DEPTH + 1) { 0x0e }, "256 nested sequences")
         // Exactly MAX_DEPTH is legal.
         val ok = IStream()
-        ok.feed(ByteArray(Sofab.MAX_DEPTH) { 0x0e }, RecordingVisitor())
-        assertEquals(DecodeStatus.INCOMPLETE, ok.status)
+        assertEquals(DecodeStatus.INCOMPLETE, ok.feed(ByteArray(Sofab.MAX_DEPTH) { 0x0e }, RecordingVisitor()))
     }
 
     @Test
@@ -160,10 +162,8 @@ class DecoderTest {
     fun feedingTheMissingBytesCompletesIt() {
         val input = IStream()
         val v = RecordingVisitor()
-        input.feed(unhex("020a"), v)
-        assertEquals(DecodeStatus.INCOMPLETE, input.status)
-        input.feed(unhex("41"), v)
-        assertEquals(DecodeStatus.COMPLETE, input.status)
+        assertEquals(DecodeStatus.INCOMPLETE, input.feed(unhex("020a"), v))
+        assertEquals(DecodeStatus.COMPLETE, input.feed(unhex("41"), v))
         assertEquals(listOf("str:0:A"), v.events)
     }
 
@@ -187,8 +187,7 @@ class DecoderTest {
     fun aSequenceEndWithANonZeroIdStillCloses() {
         // §4.9: the id of a sequence end is discarded — but still bounded by ID_MAX.
         assertEquals(listOf("seq{:1", "seq}"), decodeEvents(unhex("0e3f")))
-        val input = feedAll(unhex("0e3f"))
-        assertEquals(DecodeStatus.COMPLETE, input.status)
+        assertEquals(DecodeStatus.COMPLETE, IStream().feed(unhex("0e3f"), RecordingVisitor()))
         // A conformant re-encode is the single byte 0x07.
         assertEquals(
             "0e07",
@@ -208,15 +207,12 @@ class DecoderTest {
         val input = IStream()
         val v = RecordingVisitor()
         assertFailsWith<SofabException> { input.feed(unhex("07"), v) }
-        assertEquals(DecodeStatus.INVALID, input.status)
-        // Well-formed bytes afterwards do not revive it.
+        // Well-formed bytes afterwards do not revive it: the second feed throws the
+        // same category rather than returning an outcome for them.
         val again = assertFailsWith<SofabException> { input.feed(unhex("0001"), v) }
         assertEquals(SofabError.INVALID_MSG, again.error)
-        assertEquals(DecodeStatus.INVALID, input.status)
         input.reset()
-        assertEquals(DecodeStatus.COMPLETE, input.status)
-        input.feed(unhex("0001"), v)
-        assertEquals(DecodeStatus.COMPLETE, input.status)
+        assertEquals(DecodeStatus.COMPLETE, input.feed(unhex("0001"), v))
         assertEquals(listOf("u:0:1"), v.events)
     }
 
@@ -232,7 +228,6 @@ class DecoderTest {
         val input = IStream()
         val e = assertFailsWith<SofabException> { input.feed(unhex("021a414243"), strict) }
         assertEquals(SofabError.INVALID_MSG, e.error)
-        assertEquals(DecodeStatus.INVALID, input.status)
     }
 
     @Test
@@ -256,21 +251,19 @@ class DecoderTest {
         val input = IStream()
         val e = assertFailsWith<SofabException> { input.feed(unhex("021a414243"), capped) }
         assertEquals(SofabError.LIMIT_EXCEEDED, e.error)
-        assertTrue(input.status != DecodeStatus.INVALID, "a policy rejection is not a wire verdict")
-        assertEquals(DecodeStatus.INCOMPLETE, input.status, "the message was abandoned, not completed")
+        // A policy rejection is not a wire verdict and never becomes one: the
+        // category stays LIMIT_EXCEEDED on every later call below, and no outcome is
+        // returned at all for a message this decoder abandoned.
 
         // Terminal: every later feed is refused with the same category, without the
         // visitor being called again, and the verdict does not drift to INVALID.
         val again = assertFailsWith<SofabException> { input.feed(unhex("021a414243"), capped) }
         assertEquals(SofabError.LIMIT_EXCEEDED, again.error)
         assertEquals(1, capped.trips, "a latched stream decodes nothing further")
-        assertEquals(DecodeStatus.INCOMPLETE, input.status)
 
         // reset() is the only way out, exactly as for INVALID.
         input.reset()
-        assertEquals(DecodeStatus.COMPLETE, input.status)
-        input.feed(unhex("0808"), object : Visitor {})
-        assertEquals(DecodeStatus.COMPLETE, input.status)
+        assertEquals(DecodeStatus.COMPLETE, input.feed(unhex("0808"), object : Visitor {}))
     }
 
     // --- the fixlen/array announcement order (§4.8) --------------------------
@@ -289,8 +282,7 @@ class DecoderTest {
         // A message ending between the count and the fixlen_word announces nothing
         // at all: INCOMPLETE, not INVALID, and no arrayBegin.
         val cut = IStream()
-        cut.feed(unhex("0502"), v)
-        assertEquals(DecodeStatus.INCOMPLETE, cut.status)
+        assertEquals(DecodeStatus.INCOMPLETE, cut.feed(unhex("0502"), v))
         assertEquals(emptyList(), seen)
         // With the word in hand the kind is the concrete subtype.
         IStream().feed(unhex("050220") + le32(0) + le32(0), v)
@@ -301,7 +293,7 @@ class DecoderTest {
     fun anEmptyFixlenArrayStillConsumesItsWord() {
         assertEquals(listOf("arr:0:FP32:0"), decodeEvents(unhex("050020")))
         assertEquals(listOf("arr:0:FP64:0"), decodeEvents(unhex("050041")))
-        assertEquals(DecodeStatus.COMPLETE, feedAll(unhex("050020")).status)
+        assertEquals(DecodeStatus.COMPLETE, outcomeOf(unhex("050020")))
         // ...on the byte-at-a-time path as well.
         assertEquals(listOf("arr:0:FP64:0"), decodeEventsChunked(unhex("050041"), 1))
     }

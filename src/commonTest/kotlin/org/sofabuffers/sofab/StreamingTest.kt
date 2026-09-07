@@ -203,14 +203,15 @@ class StreamingTest {
         val chunkSize = 5
         val scratch = ByteArray(chunkSize)
         var i = 0
+        var last = DecodeStatus.INCOMPLETE
         while (i < wire.size) {
             val n = minOf(chunkSize, wire.size - i)
             wire.copyInto(scratch, 0, i, i + n)
-            input.feed(scratch, 0, n, v)
+            last = input.feed(scratch, 0, n, v)
             scratch.fill(0x5A.toByte()) // the caller reuses its buffer immediately
             i += n
         }
-        assertEquals(DecodeStatus.COMPLETE, input.status)
+        assertEquals(DecodeStatus.COMPLETE, last)
         assertEquals(expected, v.events)
     }
 
@@ -224,8 +225,7 @@ class StreamingTest {
         val v = RecordingVisitor()
         val input = IStream()
         input.feed(wire, 0, split, v)
-        input.feed(wire, split, wire.size - split, v)
-        assertEquals(DecodeStatus.COMPLETE, input.status)
+        assertEquals(DecodeStatus.COMPLETE, input.feed(wire, split, wire.size - split, v))
         assertEquals(src.size + 1, v.events.size)
         assertTrue(
             input.machineBytes <= 10,
@@ -248,14 +248,15 @@ class StreamingTest {
         }
         val input = IStream()
         var i = 0
+        var last = DecodeStatus.INCOMPLETE
         while (i < wire.size) {
             val n = minOf(512, wire.size - i)
-            input.feed(wire, i, n, v)
+            last = input.feed(wire, i, n, v)
             i += n
         }
         assertTrue(chunks > 1, "a 10 kB payload fed in 512-byte chunks arrives in pieces")
         assertContentEquals(payload, seen)
-        assertEquals(DecodeStatus.COMPLETE, input.status)
+        assertEquals(DecodeStatus.COMPLETE, last)
     }
 
     @Test
@@ -264,12 +265,10 @@ class StreamingTest {
         val b = encode { it.writeString(2, "hi") }
         val input = IStream()
         val v1 = RecordingVisitor()
-        input.feed(a, v1)
-        assertEquals(DecodeStatus.COMPLETE, input.status)
+        assertEquals(DecodeStatus.COMPLETE, input.feed(a, v1))
         input.reset()
         val v2 = RecordingVisitor()
-        input.feed(b, v2)
-        assertEquals(DecodeStatus.COMPLETE, input.status)
+        assertEquals(DecodeStatus.COMPLETE, input.feed(b, v2))
         assertEquals(listOf("u:1:7"), v1.events)
         assertEquals(listOf("str:2:hi"), v2.events)
     }

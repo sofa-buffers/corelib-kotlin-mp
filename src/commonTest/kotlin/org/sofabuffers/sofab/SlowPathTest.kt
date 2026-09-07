@@ -152,8 +152,9 @@ class SlowPathTest {
         assertEquals(whole, decodeEventsChunked(wire, 1), "one byte at a time")
         assertEquals(whole, decodeEventsChunked(wire, 2), "two bytes at a time")
         val input = IStream()
-        for (i in wire.indices) input.feed(wire, i, 1, RecordingVisitor())
-        assertEquals(DecodeStatus.COMPLETE, input.status)
+        var last = DecodeStatus.INCOMPLETE
+        for (i in wire.indices) last = input.feed(wire, i, 1, RecordingVisitor())
+        assertEquals(DecodeStatus.COMPLETE, last)
         assertTrue(input.machineBytes > 0, "the machine is what decoded this")
     }
 
@@ -174,8 +175,9 @@ class SlowPathTest {
                         ended = n
                     }
                 }
-                for (i in wire.indices) input.feed(wire, i, 1, v)
-                assertEquals(DecodeStatus.COMPLETE, input.status)
+                var last = DecodeStatus.INCOMPLETE
+                for (i in wire.indices) last = input.feed(wire, i, 1, v)
+                assertEquals(DecodeStatus.COMPLETE, last)
                 assertEquals(src.size, v.ended)
                 when (dst) {
                     is LongArray -> assertContentEquals(src, dst)

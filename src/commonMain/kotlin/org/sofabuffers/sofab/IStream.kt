@@ -83,15 +83,15 @@ private val NO_LONGS = LongArray(0)
  * [SofabException] with [SofabError.INVALID_MSG] from `feed`. Running out of bytes
  * mid-field is *not* an error: `feed` suspends and returns normally, and a
  * subsequent `feed` resumes it. To tell a message that is *complete* from one that
- * was *truncated*, read [status] after the final `feed`: it returns
- * [DecodeStatus.COMPLETE] at a clean field boundary or [DecodeStatus.INCOMPLETE]
- * if the last bytes ended inside a field or with an open (unclosed) sequence.
- * `status` is a pure, non-throwing accessor — there is no required finish/finalize
- * step; the caller owns end-of-input.
+ * was *truncated*, read what [feed] returned: [DecodeStatus.COMPLETE] at a clean
+ * field boundary, or [DecodeStatus.INCOMPLETE] if the last bytes ended inside a
+ * field or with an open (unclosed) sequence. There is no second accessor to
+ * consult and no required finish/finalize step; the caller owns end-of-input.
  *
  * **`INVALID` is terminal.** Malformed bytes are malformed regardless of what
- * follows, so a rejection sticks: [status] answers [DecodeStatus.INVALID] from
- * then on and every further `feed` throws without decoding, so a caller that
+ * follows, so a rejection sticks: it reaches the caller as
+ * [SofabError.INVALID_MSG] on the error channel and every further `feed` throws
+ * without decoding, so a caller that
  * catches the exception and keeps feeding cannot resume mid-stream on a message
  * the decoder has already proven broken, nor read a `COMPLETE` verdict for it.
  * [reset] — resynchronising onto the next message — is what clears it.
@@ -107,8 +107,7 @@ private val NO_LONGS = LongArray(0)
  * }
  * val sink = Sink()
  * val input = IStream()
- * input.feed(buf, sink)
- * if (input.status == DecodeStatus.INCOMPLETE) {
+ * if (input.feed(buf, sink) == DecodeStatus.INCOMPLETE) {
  *     // buf ended mid-message; wait for more bytes (or treat as truncation).
  * }
  * ```
@@ -197,8 +196,8 @@ public class IStream {
      * policy rejection into the `INVALID` outcome, because the same bytes decode
      * under a looser limit. The category reaches the caller on the error channel,
      * as [SofabError.LIMIT_EXCEEDED], which is one of the two surfaces §6.3 leaves
-     * open; what [status] must not do is answer [DecodeStatus.COMPLETE] for a
-     * message this decoder abandoned.
+     * open; what [feed] must not do is return [DecodeStatus.COMPLETE] for a
+     * message this decoder abandoned — and it cannot, because it throws instead.
      */
     private var limitStopped = false
 
@@ -223,9 +222,9 @@ public class IStream {
      * A **separate** latch for the same reason [limitStopped] is separate: the bytes
      * are well-formed, so folding this into [invalid] would call good bytes
      * malformed, and folding it into [limitStopped] would promise a limit to raise
-     * that nobody configured. [status] answers [DecodeStatus.INCOMPLETE] — never
-     * [DecodeStatus.COMPLETE] — for a message this decoder abandoned, which is also
-     * what makes the fast and resumable paths agree on identical bytes (§7.2).
+     * that nobody configured. [feed] throws rather than returning any outcome for
+     * a message this decoder abandoned, which is also what makes the fast and
+     * resumable paths agree on identical bytes (§7.2).
      */
     private var argRefused = false
 
@@ -255,8 +254,8 @@ public class IStream {
      * must not be called mid-message unless that is the intent — after an
      * [SofabError.INVALID_MSG] it is exactly how a stream decoder resynchronises
      * onto the next message, and the *only* way: that outcome is terminal
-     * (CORELIB_PLAN §5.2), so until this call [status] keeps answering
-     * [DecodeStatus.INVALID] and [feed] keeps refusing bytes. A
+     * (CORELIB_PLAN §5.2), so until this call [feed] keeps refusing bytes with
+     * [SofabError.INVALID_MSG]. A
      * [SofabError.LIMIT_EXCEEDED] stop (§6.2.1, §6.3) clears here too, as does a
      * [SofabError.ARGUMENT] destination refusal (§6.6.3), and it is likewise the
      * only way to clear either.
@@ -295,65 +294,31 @@ public class IStream {
     }
 
     /**
-     * Whether the bytes fed so far end exactly at a field boundary. Read after the
-     * final [feed]: [DecodeStatus.COMPLETE] when the decoder is at a clean field
-     * boundary with no open sequence, [DecodeStatus.INCOMPLETE] when the last bytes
-     * ended inside a field — a partial varint (field header or value), a
-     * fixlen/array payload shorter than declared, an array with elements still
-     * pending — or with an open (unclosed) nested sequence.
+     * The outcome of the bytes consumed so far, as [feed] returns it:
+     * [DecodeStatus.COMPLETE] at a clean field boundary with no open sequence, and
+     * [DecodeStatus.INCOMPLETE] when the last bytes ended inside a field — a partial
+     * varint (field header or value), a fixlen/array payload shorter than declared,
+     * an array with elements still pending — or with an unclosed nested sequence.
      *
-     * A decode stopped by a receiver limit or by a refused destination answers
-     * [DecodeStatus.INCOMPLETE] and keeps answering it: those bytes are well-formed,
-     * but the message was abandoned part-way through a field.
-     *
-     * A *malformed* message answers [DecodeStatus.INVALID], which outranks both
-     * other outcomes and is **terminal** (CORELIB_PLAN §5.2): [feed] threw when it
-     * read the malformed construct and the verdict is latched from there on, so no
-     * continuation — and in particular no later `feed` that would have ended at a
-     * clean field boundary — can turn it back into `COMPLETE` or `INCOMPLETE`.
-     * [reset] clears it, because that starts a new message.
-     *
-     * Per the finish-less contract this is a pure accessor: it never throws, never
-     * mutates decoder state, and never promotes an incomplete decode to an error.
+     * Private, and only ever reached on the way out of a successful [feed]. The
+     * third outcome and the two refusals never come from here: malformed input
+     * (§5.2), a receiver cap (§6.2.1) and a destination too short (§6.6.3) all leave
+     * `feed` on the error channel with their own code.
      */
-    public val status: DecodeStatus
-        get() {
-            // INVALID first: it is a property of bytes already consumed and no later
-            // state can revise it (§5.2, "INVALID wins over INCOMPLETE" and terminal).
-            if (invalid) {
-                return DecodeStatus.INVALID
-            }
-            // A receiver-limit stop is terminal too, but the bytes are well-formed:
-            // reporting INVALID would fold a policy rejection into the wire verdict,
-            // which §6.2.1 forbids. INCOMPLETE is what actually happened — the
-            // decoder stopped part-way through a message and will not finish it —
-            // and the LIMIT_EXCEEDED category is on the error channel (§6.3). The
-            // test guards a rejection thrown from a callback at a *field boundary*,
-            // where state and depth are untouched and COMPLETE would otherwise be
-            // reported for a message whose payload was never consumed.
-            if (limitStopped) {
-                return DecodeStatus.INCOMPLETE
-            }
-            // A destination refusal (§6.6.3, §6.3's `InvalidArgument`) is terminal in
-            // the same way and equally not a verdict on the bytes: the same message
-            // decodes for a caller who hands over storage that fits. It reaches the
-            // caller as SofabError.ARGUMENT on the error channel; here it is
-            // INCOMPLETE, because the decoder abandoned the message part-way through
-            // a field whose payload it never consumed. Reporting COMPLETE is the
-            // "folding into COMPLETE" §5.2.1 calls non-conformant, and it is what the
-            // fast path would otherwise do: it refuses at a clean field boundary,
-            // with state and depth untouched, while the resumable path refuses from
-            // S_ARRAY_COUNT and would answer INCOMPLETE — two outcomes for the same
-            // bytes, which §7.2 forbids.
-            if (argRefused) {
-                return DecodeStatus.INCOMPLETE
-            }
-            // COMPLETE only at a true field boundary: no partial field header varint
-            // (that is its own state, S_HEADER), no in-progress value/payload/array
-            // element (S_IDLE covers the resumable machine and mid-array between
-            // elements), and every opened sequence closed.
-            return if (state == S_IDLE && depth == 0) DecodeStatus.COMPLETE else DecodeStatus.INCOMPLETE
-        }
+    private fun outcome(): DecodeStatus {
+        // COMPLETE only at a true field boundary: no partial field header varint
+        // (that is its own state, S_HEADER), no in-progress value/payload/array
+        // element (S_IDLE covers the resumable machine and mid-array between
+        // elements), and every opened sequence closed.
+        //
+        // The terminal states need no branch here any more. A decode stopped by a
+        // malformed construct, by a receiver cap (§6.2.1) or by a refused
+        // destination (§6.6.3) leaves `feed` on the error channel and never reaches
+        // this line, so the outcomes §5.2.1 forbids folding together — a cap-stopped
+        // message reported COMPLETE, a policy rejection reported INVALID — are now
+        // unreachable by construction rather than by three guards kept in step.
+        return if (state == S_IDLE && depth == 0) DecodeStatus.COMPLETE else DecodeStatus.INCOMPLETE
+    }
 
     /**
      * Feed a whole chunk of encoded bytes, pushing decoded fields to [visitor].
@@ -362,9 +327,8 @@ public class IStream {
      * @param visitor sink for decoded fields
      * @throws SofabException [SofabError.INVALID_MSG] on malformed input
      */
-    public fun feed(data: ByteArray, visitor: Visitor) {
+    public fun feed(data: ByteArray, visitor: Visitor): DecodeStatus =
         feed(data, 0, data.size, visitor)
-    }
 
     /**
      * Feed a slice of encoded bytes, pushing decoded fields to [visitor]. Decoding
@@ -373,24 +337,22 @@ public class IStream {
      *
      * The [SofabError.INVALID_MSG] outcome is **terminal** (CORELIB_PLAN §5.2):
      * once any fed bytes have been rejected as malformed, this function decodes
-     * nothing further and rethrows for every subsequent call, and [status] keeps
-     * reporting [DecodeStatus.INVALID], until [reset] begins a new message. Running
+     * nothing further and rethrows for every subsequent call, until [reset] begins
+     * a new message. Running
      * out of bytes mid-field is *not* that: it suspends and resumes on the next
      * call.
      *
      * A [SofabError.LIMIT_EXCEEDED] rejection — a receiver cap the [Visitor]
      * applied to a schema-unbounded count or length (§6.2.1) — is terminal in the
      * same way (§6.3) and latches separately: further feeds are refused with that
-     * same code, and [status] reports [DecodeStatus.INCOMPLETE] rather than
-     * [DecodeStatus.COMPLETE] for a message this decoder abandoned. It is never
-     * folded into [DecodeStatus.INVALID], because the bytes are well-formed.
+     * same code. It is never folded into [DecodeStatus.INVALID], because the bytes
+     * are well-formed, and never into a returned outcome at all.
      *
      * A bulk destination this decoder itself refused as too short for the announced
      * count (§6.6.3, [requireRoom]) is terminal and latches the same way, on its own
      * flag: the field's payload was never consumed, so there is no position to
      * resume from, and continuing would read the refused payload's bytes as field
-     * headers. Further feeds throw [SofabError.ARGUMENT] and [status] reports
-     * [DecodeStatus.INCOMPLETE]. A [SofabError.ARGUMENT] a *visitor* raises for its
+     * headers. Further feeds throw [SofabError.ARGUMENT]. A [SofabError.ARGUMENT] a *visitor* raises for its
      * own reasons is not that verdict and latches nothing.
      *
      * @param data backing array
@@ -402,7 +364,7 @@ public class IStream {
      *   on any call after a receiver limit stopped the decode; [SofabError.ARGUMENT]
      *   on any call after a refused destination stopped it
      */
-    public fun feed(data: ByteArray, off: Int, len: Int, visitor: Visitor) {
+    public fun feed(data: ByteArray, off: Int, len: Int, visitor: Visitor): DecodeStatus {
         if (invalid || limitStopped || argRefused) {
             throwLatched()
         }
@@ -428,6 +390,7 @@ public class IStream {
             }
             throw e
         }
+        return outcome()
     }
 
     /**

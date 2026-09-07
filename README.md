@@ -79,7 +79,7 @@ The import namespace is the package `org.sofabuffers.sofab` — the family's fix
 | Goal | How |
 |------|-----|
 | Streaming **out** | `OStream` writes into a small caller-owned `ByteArray` and hands each full buffer to a `FlushSink`, so a message can exceed the buffer — and RAM. `MIN_OUTPUT_BUFFER` is **1**, and any size at or above it produces byte-identical output. |
-| Streaming **in** | `IStream.feed` accepts arbitrarily small chunks; a message may split at any byte boundary, and string / blob payloads arrive in pieces. Malformed bytes throw `SofabException(INVALID_MSG)`; running out of bytes mid-field is **not** an error — `feed` suspends and resumes. `status` afterwards tells a `COMPLETE` message from a truncated `INCOMPLETE` one; it never throws, and there is no finish/finalize step. A rejection is **terminal** and `reset()` is what clears it. |
+| Streaming **in** | `IStream.feed` accepts arbitrarily small chunks; a message may split at any byte boundary, and string / blob payloads arrive in pieces. Malformed bytes throw `SofabException(INVALID_MSG)`; running out of bytes mid-field is **not** an error — `feed` suspends and resumes. What `feed` returns tells a `COMPLETE` message from a truncated `INCOMPLETE` one, and there is no second accessor and no finish/finalize step. A rejection is **terminal** and `reset()` is what clears it. |
 | Chunking costs only what straddles | Whole fields are decoded by a cursor advanced over the buffer; only the one construct that would run past the end of the supplied bytes goes through the resumable byte-at-a-time machine, and the rest of the chunk goes straight back to the bulk path — inside an array as much as between fields. A boundary in a 200-element array costs one element, not the remainder (`StreamingTest` asserts it). |
 | No allocation after construction | State lives in caller-provided arrays plus one small object per direction, whose fixed-size working state — the encoder's `MAX_DEPTH` hold-back run, the decoder's 8-byte scalar landing zone — is sized in the constructor. After that, `write`, `flush` and `feed` allocate nothing at all, and no wire number sizes anything. Scalars stay primitive (`Long` / `Double`) — no boxing on the hot path on JVM and native. |
 | Sparse sequence framing, still one pass | `writeSequenceBeginLazy` holds a sequence header back until a child is actually written, so a sequence-typed **field** with no content is omitted rather than framed empty — decided in a single forward pass, with no sub-message buffering. `writeSequenceEnd` drops such a sequence; `writeSequenceEndKeep` forces the frame out where it carries information (a wrapper-array **element**, whose presence gives the array its length). Held-back ids are encoder state, not buffer content, so a one-byte output buffer still produces the one-shot bytes, and the run reaches the full `MAX_DEPTH` (255), sized once when the `OStream` is constructed. |
@@ -154,8 +154,7 @@ class My : Visitor {
 
 val sink = My()
 val input = IStream()
-input.feed(buf, 0, used, sink)
-check(input.status == DecodeStatus.COMPLETE)
+check(input.feed(buf, 0, used, sink) == DecodeStatus.COMPLETE)
 ```
 
 `fixlenBegin(id, subtype, total)` announces a string / blob / float field at its
@@ -181,8 +180,8 @@ while (true) {
         }
     })
 }
-// The caller's framing decides when the input is over; a still-INCOMPLETE status
-// at that point is a truncated message, not a decoder error.
+// The caller's framing decides when the input is over; a `feed` that still
+// answers INCOMPLETE at that point saw a truncated message, not a decoder error.
 ```
 
 A fed chunk is **borrowed only for the duration of the call**: the decoder keeps
@@ -201,8 +200,9 @@ sequence trio, plus `flush()`, `bufferSet(buffer, offset)`, `reset(buffer)` and
 ### IStream
 
 `IStream()` holds the decode state: `feed(data, visitor)` or
-`feed(data, off, len, visitor)`, the `status` property (`COMPLETE` / `INCOMPLETE` /
-`INVALID`), and `reset()` to start the next message — which is also the only way
+`feed(data, off, len, visitor)`, each returning `COMPLETE` or `INCOMPLETE` (every
+refusal, `INVALID` included, arrives on the error channel instead), and `reset()`
+to start the next message — which is also the only way
 out of a latched terminal verdict (`INVALID_MSG`, a `LIMIT_EXCEEDED` receiver-limit
 stop, or an `ARGUMENT` destination refusal).
 

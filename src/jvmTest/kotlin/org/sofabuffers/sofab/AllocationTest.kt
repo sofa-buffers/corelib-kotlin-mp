@@ -211,15 +211,16 @@ class AllocationTest {
             input.reset()
             input.feed(bigWire, 0, bigWire.size, fold)
         }
+        var hostileOutcome = DecodeStatus.COMPLETE
         val hostileBytes = measure(REPS) {
             input.reset()
-            input.feed(hostile, 0, hostile.size, fold)
+            hostileOutcome = input.feed(hostile, 0, hostile.size, fold)
         }
 
         assertEquals(0, smallBytes, "a ten-byte payload costs the codec nothing")
         assertEquals(0, bigBytes, "and a hundred-kilobyte one costs exactly the same nothing")
         assertEquals(0, hostileBytes, "an undelivered count sizes nothing")
-        assertEquals(DecodeStatus.INCOMPLETE, input.status, "the hostile count is still awaited")
+        assertEquals(DecodeStatus.INCOMPLETE, hostileOutcome, "the hostile count is still awaited")
     }
 
     // --- fixtures ------------------------------------------------------------

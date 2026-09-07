@@ -117,8 +117,7 @@ class FuzzRoundTripTest {
             // 1. one-shot decode
             val v = RecordingVisitor()
             val input = IStream()
-            input.feed(wire, v)
-            assertEquals(DecodeStatus.COMPLETE, input.status, why)
+            assertEquals(DecodeStatus.COMPLETE, input.feed(wire, v), why)
             assertEquals(expected, v.events, why)
 
             // 2. decode in randomly-sized chunks: the same events, whatever the split
@@ -126,12 +125,13 @@ class FuzzRoundTripTest {
             val chunked = RecordingVisitor()
             val streaming = IStream()
             var i = 0
+            var last = DecodeStatus.INCOMPLETE
             while (i < wire.size) {
                 val n = minOf(rnd.nextInt(1, 9), wire.size - i)
-                streaming.feed(wire, i, n, chunked)
+                last = streaming.feed(wire, i, n, chunked)
                 i += n
             }
-            assertEquals(DecodeStatus.COMPLETE, streaming.status, why)
+            assertEquals(DecodeStatus.COMPLETE, last, why)
             assertEquals(expected, chunked.events, why)
 
             // 3. streamed encode through a one-byte buffer == the one-shot bytes

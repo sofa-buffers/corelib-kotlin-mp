@@ -249,11 +249,12 @@ class SequenceGrowthTest {
                         )
                     }
                     if (expect["terminal"]?.jsonPrimitive?.boolean == true) {
-                        // Terminal, but not folded into the wire-conformance outcome
-                        // (§6.3): these bytes are well-formed, so the status is
-                        // neither INVALID nor COMPLETE.
-                        assertTrue(stream.status != DecodeStatus.INVALID, "$name: status is not INVALID")
-                        assertTrue(stream.status != DecodeStatus.COMPLETE, "$name: status is not COMPLETE")
+                        // Terminal, but not folded into the wire-conformance
+                        // outcome (§6.3): these bytes are well-formed, so `feed`
+                        // reports the refusal on the error channel with its own
+                        // category and returns no outcome for them at all — neither
+                        // INVALID nor COMPLETE, which is asserted where the throw is
+                        // caught above.
                     }
                 }
                 else -> error("$name: unknown expected outcome $outcome")

@@ -96,13 +96,13 @@ class VectorConformanceTest {
             val wire = unhex(v.serializedHex())
             val visitor = RecordingVisitor()
             val input = IStream()
-            input.feed(wire, visitor)
+            val outcome = input.feed(wire, visitor)
             VectorRun.eq("decode", v, expectedEvents(v), visitor.events, "decode ${v.name()}")
             VectorRun.eq(
                 "decode",
                 v,
                 DecodeStatus.COMPLETE,
-                input.status,
+                outcome,
                 "decode ${v.name()} consumes the message exactly",
             )
         }
@@ -184,17 +184,18 @@ class VectorConformanceTest {
             for (chunk in intArrayOf(0, 1, 3)) {
                 val visitor = SkipVisitor(skip)
                 val input = IStream()
+                var outcome = DecodeStatus.INCOMPLETE
                 if (chunk == 0) {
-                    input.feed(wire, visitor)
+                    outcome = input.feed(wire, visitor)
                 } else {
                     var i = 0
                     while (i < wire.size) {
                         val n = minOf(chunk, wire.size - i)
-                        input.feed(wire, i, n, visitor)
+                        outcome = input.feed(wire, i, n, visitor)
                         i += n
                     }
                 }
-                VectorRun.eq("skip", v, DecodeStatus.COMPLETE, input.status, "skip ${v.name()} (chunk $chunk)")
+                VectorRun.eq("skip", v, DecodeStatus.COMPLETE, outcome, "skip ${v.name()} (chunk $chunk)")
                 VectorRun.eq(
                     "skip",
                     v,
@@ -404,7 +405,11 @@ class VectorConformanceTest {
                     }
                 }
                 assertEquals(SofabError.INVALID_MSG, e.error, v.name())
-                assertEquals(DecodeStatus.INVALID, input.status, v.name())
+                // The verdict latches: feeding again re-raises it instead of
+                // decoding, which is how a terminal INVALID is observed now that
+                // `feed` is the only answer.
+                val latched = assertFailsWith<SofabException>(v.name()) { input.feed(ByteArray(0), strict) }
+                assertEquals(SofabError.INVALID_MSG, latched.error, v.name())
             }
         }
     }
@@ -415,8 +420,7 @@ class VectorConformanceTest {
         // invalid-UTF-8 string nobody reads does not make the message INVALID.
         for (v in invalidUtf8) {
             val input = IStream()
-            input.feed(unhex(v.str("serialized_hex")), object : Visitor {})
-            assertEquals(DecodeStatus.COMPLETE, input.status, "skipped ${v.name()}")
+            assertEquals(DecodeStatus.COMPLETE, input.feed(unhex(v.str("serialized_hex")), object : Visitor {}), "skipped ${v.name()}")
         }
     }
 

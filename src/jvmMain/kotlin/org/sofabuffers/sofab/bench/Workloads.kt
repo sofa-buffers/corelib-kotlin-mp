@@ -295,8 +295,7 @@ internal object Workloads {
             },
             Workload("decode_composite_skip", "decode: composite skip-all", compWire.size) {
                 val input = IStream()
-                input.feed(compWire, SKIP_ALL)
-                input.status.ordinal.toLong()
+                input.feed(compWire, SKIP_ALL).ordinal.toLong()
             },
         )
     }
