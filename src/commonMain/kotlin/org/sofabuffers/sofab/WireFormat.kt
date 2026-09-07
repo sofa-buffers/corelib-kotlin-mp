@@ -27,10 +27,19 @@ internal const val F_BLOB: Int = 0x3
 internal const val ID_MAX: Long = Int.MAX_VALUE.toLong()
 
 /**
- * Largest array element count / fixlen byte length (`INT32_MAX`), matching
- * `SOFAB_ARRAY_MAX` / `SOFAB_FIXLEN_MAX`.
+ * Largest array element count (`INT32_MAX`), matching `SOFAB_ARRAY_MAX`.
  */
 internal const val ARRAY_MAX: Long = Int.MAX_VALUE.toLong()
+
+/**
+ * Largest fixlen byte length (`INT32_MAX`), matching `SOFAB_FIXLEN_MAX`.
+ *
+ * Equal to [ARRAY_MAX] on this profile and a separate constant regardless:
+ * CORELIB_PLAN §6.2 states the two ceilings independently and lets a constrained
+ * profile lower either one on its own (§6.2.2), so a fixlen length must be judged
+ * against the fixlen ceiling even where the two numbers coincide today.
+ */
+internal const val FIXLEN_MAX: Long = Int.MAX_VALUE.toLong()
 
 /** Number of value bits; bounds the maximum varint length (64-bit value type). */
 internal const val VALUE_BITS: Int = 64

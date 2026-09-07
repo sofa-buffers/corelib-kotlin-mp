@@ -17,6 +17,10 @@ class ApiTest {
         assertEquals(1, Sofab.API_VERSION, "the wire contract is version 1 (§6.2)")
         assertEquals(2147483647, Sofab.ID_MAX)
         assertEquals(2147483647L, Sofab.ARRAY_MAX)
+        // §6.2 states the array and fixlen ceilings separately, and §6.2.2 lets a
+        // constrained profile lower either alone. This profile lowers neither, so
+        // the two carry the same number — asserted as two facts, not one.
+        assertEquals(2147483647L, Sofab.FIXLEN_MAX)
         assertEquals(255, Sofab.MAX_DEPTH)
         assertTrue(Sofab.MIN_OUTPUT_BUFFER in 1..20)
     }
