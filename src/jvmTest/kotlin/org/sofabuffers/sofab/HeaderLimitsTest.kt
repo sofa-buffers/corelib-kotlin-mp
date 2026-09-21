@@ -92,185 +92,11 @@ class HeaderLimitsTest {
          */
         val SATISFIED: Set<String> = KNOWN_TAGS
 
-        /** The three §6.2.1 receiver caps a case may configure. */
-        val KNOWN_LIMITS: Set<String> = setOf("max_dyn_string_len", "max_dyn_blob_len", "max_dyn_array_count")
-
-        /**
-         * The schema declares no bound on this field, so the receiver cap is what
-         * governs it. The library reads any negative number this way.
-         */
-        const val NO_SCHEMA_BOUND = -1
-
-        /**
-         * No cap stated for this construct.
-         *
-         * Deliberately *not* a large number: §6.2.1 forbids reading an omitted cap as
-         * unlimited, so the library answers `ARGUMENT` for a schema-unbounded field
-         * handed no cap. A case bounds exactly one construct, so the other two carry
-         * this — and a port that consulted the wrong cap fails loudly with `ARGUMENT`
-         * instead of quietly passing.
-         */
-        const val NO_CAP_STATED = -1
-
-        /** The ceiling lifted, for the negative control only. */
-        const val UNCAPPED = Int.MAX_VALUE
-
         /** A byte to feed after a terminal rejection; any byte does. */
         val ONE_MORE_BYTE = byteArrayOf(0x61)
     }
 
     private val cases: List<JsonObject> = Vectors.headerLimits
-
-    // --- the ceilings a case configures for its own run --------------------------
-
-    /**
-     * The two ceilings, as one case states them. Exactly one is ever in play: a
-     * schema-bounded field carries [NO_CAP_STATED] for every cap, and a field the
-     * schema leaves unbounded carries [NO_SCHEMA_BOUND].
-     */
-    private class Ceiling(
-        val schemaBound: Int,
-        val stringCap: Int,
-        val blobCap: Int,
-        val arrayCap: Int,
-    )
-
-    /**
-     * Read the ceiling out of a case. [lifted] answers the negative control: every
-     * receiver cap raised out of the way, the schema bound left exactly as stated —
-     * a schema bound is not a receiver policy and lifting it would be a different
-     * experiment.
-     */
-    private fun ceilingOf(case: JsonObject, lifted: Boolean = false): Ceiling {
-        val name = case.name()
-        val limits = case["limits"]?.jsonObject
-        val schema = case["schema"]?.jsonObject
-        require(!(limits != null && schema != null)) {
-            "$name carries both limits and schema; §6.2.1 forbids capping a schema-bounded field"
-        }
-        if (schema != null) {
-            require(schema.keys == setOf("maxlen")) { "$name: unknown schema key(s) ${schema.keys}" }
-            return Ceiling(schema.int("maxlen"), NO_CAP_STATED, NO_CAP_STATED, NO_CAP_STATED)
-        }
-        requireNotNull(limits) { "$name carries neither limits nor schema" }
-        require(limits.size == 1) { "$name states ${limits.size} caps; a case bounds one construct" }
-        for (k in limits.keys) require(k in KNOWN_LIMITS) { "$name: unknown receiver cap $k" }
-        fun cap(key: String): Int = when {
-            limits[key] == null -> NO_CAP_STATED
-            lifted -> UNCAPPED
-            else -> limits.int(key)
-        }
-        return Ceiling(
-            NO_SCHEMA_BOUND,
-            cap("max_dyn_string_len"),
-            cap("max_dyn_blob_len"),
-            cap("max_dyn_array_count"),
-        )
-    }
-
-    // --- the destination, standing in for the generated layer --------------------
-
-    /**
-     * A visitor that applies the case's ceiling **at the header word**, which is
-     * where §6.2.1 puts the enforcement point: "at the count/length header, before
-     * the allocation it is meant to prevent".
-     *
-     * It records what the decoder announced before it decides anything, so a case
-     * that rejects still proves the header was read as the case describes.
-     */
-    private class HeaderDest(private val ceiling: Ceiling) : Visitor {
-        val events: MutableList<String> = mutableListOf()
-        var subtype: FixlenType? = null
-            private set
-        var declaredLength: Int = -1
-            private set
-        var kind: ArrayKind? = null
-            private set
-        var declaredCount: Int = -1
-            private set
-
-        override fun fixlenBegin(id: Int, subtype: FixlenType, total: Int) {
-            events.add("fixlen:$id:$subtype:$total")
-            this.subtype = subtype
-            declaredLength = total
-            // The library's own comparison, made at the length word. `string`/`blob`
-            // call the same routine, so this is one implementation of the rule
-            // applied where §6.2.1 requires it — not a second one (#31).
-            when (subtype) {
-                FixlenType.STRING -> PayloadAcc.checkStringLength(total, ceiling.schemaBound, ceiling.stringCap)
-                FixlenType.BLOB -> PayloadAcc.checkBlobLength(total, ceiling.schemaBound, ceiling.blobCap)
-                // fp32/fp64 carry a width the format fixes; there is nothing to bound.
-                FixlenType.FP32, FixlenType.FP64 -> Unit
-            }
-        }
-
-        override fun arrayBegin(id: Int, kind: ArrayKind, count: Int) {
-            events.add("array:$id:$kind:$count")
-            this.kind = kind
-            declaredCount = count
-            boundCount(count)
-        }
-
-        /**
-         * A count ahead of its payload, bound exactly as a length is (§6.2.1) — and
-         * unlike a wrapper array, which carries no count on the wire and is bound at
-         * the element index instead ([Seq], and the `sequence_growth` block).
-         *
-         * Stated here rather than called out of the library because an array
-         * destination is the generated layer's: [Seq.ensureCap] grows one against
-         * elements that have actually arrived and never sizes from an announced
-         * count, so the count itself is refused by the caller that owns the
-         * destination. The categories are the library's, and identical to
-         * [PayloadAcc]'s: a declared schema `count` makes an over-count message
-         * malformed (MESSAGE_SPEC §7.1); a schema-uncounted array is the receiver
-         * cap's, and its breach is the `LIMIT_EXCEEDED` policy category (§6.3) — or
-         * `ARGUMENT` where the call stated no cap at all, since §6.2.1 forbids
-         * reading an omitted cap as unlimited.
-         */
-        private fun boundCount(count: Int) {
-            if (ceiling.schemaBound >= 0) {
-                if (count > ceiling.schemaBound) {
-                    throw SofabException(
-                        SofabError.INVALID_MSG,
-                        "element count $count above declared count ${ceiling.schemaBound}",
-                    )
-                }
-            } else if (count > ceiling.arrayCap) {
-                if (ceiling.arrayCap < 0) {
-                    throw SofabException(
-                        SofabError.ARGUMENT,
-                        "max_dyn_array_count not stated (cap ${ceiling.arrayCap}) for count $count",
-                    )
-                }
-                throw SofabException(
-                    SofabError.LIMIT_EXCEEDED,
-                    "element count $count above configured limit ${ceiling.arrayCap}",
-                )
-            }
-        }
-    }
-
-    // --- feeding one case --------------------------------------------------------
-
-    /**
-     * The bytes a case is fed as: its `chunks` where it has them, otherwise
-     * `serialized` in one call. A chunked case must carry the same bytes as the
-     * whole string — the verdict is a property of the bytes and not of how they were
-     * split (§7.2 item 4), which the case can only test if the two agree.
-     */
-    private fun chunksOf(case: JsonObject): List<ByteArray> {
-        val serialized = case.str("serialized")
-        val chunks = case["chunks"]?.jsonArray ?: return listOf(unhex(serialized))
-        val parts = chunks.map { it.jsonPrimitive.content }
-        assertEquals(serialized, parts.joinToString(""), "${case.name()}: chunks are not the serialized bytes")
-        return parts.map { unhex(it) }
-    }
-
-    private fun feed(stream: IStream, dest: HeaderDest, parts: List<ByteArray>): DecodeStatus {
-        var last = DecodeStatus.INCOMPLETE
-        for (part in parts) last = stream.feed(part, dest)
-        return last
-    }
 
     /**
      * The payload the header announced, so an in-cap control can be **carried
@@ -315,14 +141,14 @@ class HeaderLimitsTest {
             // looks like, and `toInt()` would throw NumberFormatException while
             // parsing the block rather than letting the port answer.
             val declared = case["declared"]!!.jsonPrimitive.content.toLong()
-            val dest = HeaderDest(ceilingOf(case))
+            val dest = HeaderDest(ceilingOf(case), fieldId = case.int("field_id"))
             val stream = IStream()
             val parts = chunksOf(case)
 
             when (outcome) {
                 "incomplete" -> {
                     assertNull(expect["terminal"], "$name: `terminal` on an incomplete case")
-                    assertEquals(DecodeStatus.INCOMPLETE, feed(stream, dest, parts), "$name: outcome")
+                    assertEquals(DecodeStatus.INCOMPLETE, feedAll(stream, dest, parts, name), "$name: outcome")
                     assertHeaderRead(name, case, dest, declared)
                     // The control's whole point: the ceiling admits this length, so
                     // the payload still decodes and the message completes.
@@ -337,7 +163,7 @@ class HeaderLimitsTest {
                     // wire verdict: the same message decodes for a receiver
                     // configured more loosely (§6.2.1, §6.3).
                     val thrown = assertFailsWith<SofabException>("$name: want a rejection") {
-                        feed(stream, dest, parts)
+                        feedAll(stream, dest, parts, name)
                     }
                     assertEquals(SofabError.LIMIT_EXCEEDED, thrown.error, "$name: error category")
                     assertHeaderRead(name, case, dest, declared)
@@ -354,7 +180,7 @@ class HeaderLimitsTest {
                     // payload contradicts the schema both peers agreed on
                     // (MESSAGE_SPEC §7.1), and no receiver cap may touch the field.
                     val thrown = assertFailsWith<SofabException>("$name: want a rejection") {
-                        feed(stream, dest, parts)
+                        feedAll(stream, dest, parts, name)
                     }
                     assertEquals(SofabError.INVALID_MSG, thrown.error, "$name: error category")
                     assertHeaderRead(name, case, dest, declared)
@@ -423,19 +249,19 @@ class HeaderLimitsTest {
             val expect = case["expect"]!!.jsonObject
             if (expect.str("outcome") == "incomplete") continue
 
-            val dest = HeaderDest(ceilingOf(case, lifted = true))
+            val dest = HeaderDest(ceilingOf(case, Lift.CAPS), fieldId = case.int("field_id"))
             val stream = IStream()
             if (case["schema"] != null) {
                 // A schema bound is not a receiver cap and was not lifted.
                 val thrown = assertFailsWith<SofabException>("$name: the schema bound still speaks") {
-                    feed(stream, dest, chunksOf(case))
+                    feedAll(stream, dest, chunksOf(case), name)
                 }
                 assertEquals(SofabError.INVALID_MSG, thrown.error, "$name: error category, caps lifted")
                 keptTheirVerdict++
             } else {
                 assertEquals(
                     DecodeStatus.INCOMPLETE,
-                    feed(stream, dest, chunksOf(case)),
+                    feedAll(stream, dest, chunksOf(case), name),
                     "$name: outcome with the cap lifted",
                 )
                 fellBack++
@@ -542,7 +368,7 @@ class HeaderLimitsTest {
     fun aFormatCeilingBreachOutranksAReceiverCapOnTheSameWord() {
         // 02 = id 0, wire type 2 (fixlen); then (3_000_000_000 << 3) | 2 as a varint.
         val bytes = byteArrayOf(0x02, 0x82.toByte(), 0xe0.toByte(), 0x8b.toByte(), 0xb4.toByte(), 0x59)
-        val dest = HeaderDest(Ceiling(NO_CAP_STATED, 16, NO_CAP_STATED, NO_CAP_STATED))
+        val dest = HeaderDest(Ceiling(NO_SCHEMA_BOUND, 16, NO_CAP_STATED, NO_CAP_STATED))
         val stream = IStream()
         val thrown = assertFailsWith<SofabException> { stream.feed(bytes, dest) }
         assertEquals(
