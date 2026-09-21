@@ -165,6 +165,9 @@ public object Seq {
      * This is not an `inline fun`: it takes no function argument, both element
      * types it serves ([String] and [ByteArray]) are reference types that a single
      * generic spans at no cost, and one shared body keeps the call sites small.
+     * That was measured too: inlining it (or [checkIndex]) into the generated
+     * visitor grew the callbacks past what the JIT inlines and cost about +3 % of
+     * a decode, where the plain function is inlined by the JIT anyway.
      *
      * @param out the destination list, which this grows
      * @param id the element's wire id, which is its index
@@ -536,7 +539,7 @@ public object Seq {
      * capacity decision — is what bounds it; the bytes are well formed, the same
      * element decodes for a receiver configured more loosely, and the verdict is
      * the [SofabError.LIMIT_EXCEEDED] policy category (§6.3) — or, where the call
-     * stated no cap at all, [SofabError.ARGUMENT]; see [refuse].
+     * stated no cap at all, [SofabError.ARGUMENT]; see [refusal].
      *
      * Neither number is this object's. Both arrive per call, are used for this one
      * comparison and are not retained; nothing here defaults, invents or clamps to
@@ -554,21 +557,25 @@ public object Seq {
      *     handed no cap at all ([rcap] negative)
      */
     public fun checkIndex(id: Int, cap: Int, rcap: Int) {
-        if (cap >= 0) {
-            if (id >= cap) {
-                throw SofabException(SofabError.INVALID_MSG, "array index $id above declared count $cap")
-            }
-        } else if (id >= rcap) {
-            refuse(id, rcap)
-        }
+        if (id >= (if (cap >= 0) cap else rcap)) throw refusal(id, cap, rcap)
     }
 
     /**
-     * Name the refusal a schema-uncounted [id] has earned: a stated cap it reaches,
-     * or a cap that was never stated at all (CORELIB_PLAN §6.3).
+     * Build the refusal an [id] that [checkIndex] rejected has earned: a declared
+     * [cap] it reaches (malformed input, [SofabError.INVALID_MSG], MESSAGE_SPEC
+     * §7.1), a stated receiver cap it reaches, or a cap that was never stated at
+     * all (CORELIB_PLAN §6.3).
      *
-     * Out of line, so the check itself stays a single compare on a call generated
-     * code already makes and the message building never sits on the hot path.
+     * Out of line, and **returned** for the caller to throw rather than thrown
+     * here, so that [checkIndex] stays one compare and one `throw` — small enough
+     * that a JIT inlines it at every call site whatever that site's frequency.
+     * That is measured, not assumed: with the message building in its body (48
+     * bytes of bytecode, and a `Nothing`-typed call would not help, since Kotlin
+     * follows one with a `KotlinNothingValueException` throw of its own) HotSpot
+     * C2 reported it "too big" at the generated `fixlenBegin` arms that bound a
+     * string/blob element's index at the length word, and those calls cost +1.2 %
+     * of a `vehicle_telemetry` decode (generator#587). At 22 bytes it is inlined
+     * at every site and the whole #587 move reads −0.35 % instead.
      *
      * The two categories say different things and are not interchangeable.
      * [SofabError.LIMIT_EXCEEDED] means *"raise my limit, or the sender must send
@@ -582,11 +589,10 @@ public object Seq {
      * exist. The refusal itself is the same either way: §6.2.1 forbids reading an
      * omitted cap as *unlimited*, so an unstated cap still admits no element.
      */
-    private fun refuse(id: Int, rcap: Int): Nothing {
-        if (rcap < 0) {
-            throw SofabException(SofabError.ARGUMENT, "max_dyn_array_count not stated (cap $rcap) for array index $id")
-        }
-        throw SofabException(SofabError.LIMIT_EXCEEDED, "array index $id above configured limit $rcap")
+    private fun refusal(id: Int, cap: Int, rcap: Int): SofabException = when {
+        cap >= 0 -> SofabException(SofabError.INVALID_MSG, "array index $id above declared count $cap")
+        rcap < 0 -> SofabException(SofabError.ARGUMENT, "max_dyn_array_count not stated (cap $rcap) for array index $id")
+        else -> SofabException(SofabError.LIMIT_EXCEEDED, "array index $id above configured limit $rcap")
     }
 
     // -----------------------------------------------------------------------
