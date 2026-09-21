@@ -339,16 +339,26 @@ class VectorConformanceTest {
      * `sequence_growth`, whose cases are keyed by a delivery order of element ids
      * rather than by bytes and are run by [SequenceGrowthTest] (§7.2 item 8); and
      * `header_limits`, whose cases are keyed by a header that declares a length or
-     * count and then ends, and are run by [HeaderLimitsTest] (§6.2.1, §6.3); and
-     * `boolean_tolerant`, whose cases carry a non-canonical boolean and are run by
-     * [BooleanTolerantTest] (§4.4). Every block this port runs must be present, and a
-     * block it does not run must be ignored rather than fail or warn, which is what
-     * keeps this repo able to adopt the shared file verbatim (§7.1).
+     * count and then ends, and are run by [HeaderLimitsTest] (§6.2.1, §6.3), with
+     * `header_limits_nested` carrying that same assertion one or two sequence frames
+     * deeper ([HeaderLimitsNestedTest]); and `boolean_tolerant`, whose cases carry a
+     * non-canonical boolean and are run by [BooleanTolerantTest] (§4.4). Every block
+     * this port runs must be present, and a block it does not run must be ignored
+     * rather than fail or warn, which is what keeps this repo able to adopt the
+     * shared file verbatim (§7.1).
      */
     @Test
     fun everyBlockThisPortRunsIsPresentAndOthersAreTolerated() {
         assertEquals("sofabuffers-test-vectors", Vectors.format, "the loader read the shared file")
-        val run = setOf("vectors", "invalid_utf8", "sequence_growth", "header_limits", "boolean_tolerant")
+        val run =
+            setOf(
+                "vectors",
+                "invalid_utf8",
+                "sequence_growth",
+                "header_limits",
+                "header_limits_nested",
+                "boolean_tolerant",
+            )
         assertTrue(Vectors.blocks.containsAll(run), "the blocks this port runs are all present")
         val notRun = Vectors.blocks - setOf("format", "version", "description", "notes") - run
         println("[test-vectors] top-level blocks present but not run here: ${notRun.ifEmpty { setOf("none") }}")
@@ -356,6 +366,7 @@ class VectorConformanceTest {
         assertTrue(invalidUtf8.isNotEmpty(), "the invalid_utf8 block loaded")
         assertTrue(Vectors.sequenceGrowth.isNotEmpty(), "the sequence_growth block loaded")
         assertTrue(Vectors.headerLimits.isNotEmpty(), "the header_limits block loaded")
+        assertTrue(Vectors.headerLimitsNested.isNotEmpty(), "the header_limits_nested block loaded")
         assertTrue(Vectors.booleanTolerant.isNotEmpty(), "the boolean_tolerant block loaded")
     }
 
@@ -723,6 +734,20 @@ internal object Vectors {
      * cannot be vectors; they are read as raw objects where they are replayed.
      */
     val headerLimits: List<JsonObject> = root["header_limits"]?.jsonArray.orEmpty().map { it.jsonObject }
+
+    /**
+     * The header-ceiling cases one or two sequence frames deeper, run by
+     * [HeaderLimitsNestedTest].
+     *
+     * A separate top-level block deliberately: every byte string here begins with a
+     * sequence header, so a runner that does not read `frames` would bind its ceiling
+     * at the top level, cap nothing and answer INCOMPLETE where the case demands a
+     * rejection. Folding them into `header_limits` would turn a port red before it
+     * could act; as their own block an older consumer ignores them and each port
+     * adopts when it is ready.
+     */
+    val headerLimitsNested: List<JsonObject> =
+        root["header_limits_nested"]?.jsonArray.orEmpty().map { it.jsonObject }
 
     /**
      * The tolerated-boolean cases of CORELIB_PLAN §4.4, run by [BooleanTolerantTest].
