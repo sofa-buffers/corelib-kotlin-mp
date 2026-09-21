@@ -29,6 +29,9 @@ class SeqTest {
     /** @see NO_COUNT */
     private val RCAP = 16384
 
+    /** The payload-side twin of [RCAP]: this port's `max_dyn_string_len`. */
+    private val RMAXLEN = 256 * 1024
+
     // -----------------------------------------------------------------------
     // Growth
     // -----------------------------------------------------------------------
@@ -141,6 +144,221 @@ class SeqTest {
             booleanArrayOf(true, false, false, false),
             Seq.ensureCap(booleanArrayOf(true, false), 2, 4),
         )
+    }
+
+    // -----------------------------------------------------------------------
+    // Element placement
+    // -----------------------------------------------------------------------
+    //
+    // These tests bring their own container and call the helper directly. That is
+    // the point of the move: the placement rules of MESSAGE_SPEC §5.1 are invisible
+    // in the bytes — two ports can disagree about every one of them and still emit
+    // an identical message — so a decode-only test can never pin them down.
+
+    @Test
+    fun aLeafElementLandsAtTheIndexItsIdNames() {
+        val out = mutableListOf<String>()
+        for (id in 0 until 3) Seq.placeElem(out, id, "", "e$id", NO_COUNT, RCAP)
+        assertContentEquals(listOf("e0", "e1", "e2"), out)
+    }
+
+    @Test
+    fun anOmittedInteriorElementLeavesTheElementDefaultInTheGap() {
+        // §5.1 with §2: an interior element equal to the element default is omitted
+        // by a conformant encoder, so id 3 has to land at index 3 — the array is
+        // four long and the three slots below it hold the default, not a shift.
+        val out = mutableListOf<String>()
+        Seq.placeElem(out, 3, "", "last", NO_COUNT, RCAP)
+        assertEquals(4, out.size)
+        assertContentEquals(listOf("", "", "", "last"), out)
+    }
+
+    @Test
+    fun aGapInABlobArrayIsTheSharedEmptyArrayAndCostsNoAllocation() {
+        // The gap value is passed in, and for a blob array it is the shared
+        // zero-length array: a gap allocates nothing because a zero-length array has
+        // no state to share wrongly.
+        val out = mutableListOf<ByteArray>()
+        Seq.placeElem(out, 2, Seq.EMPTY_BYTES, byteArrayOf(9), NO_COUNT, RCAP)
+        assertEquals(3, out.size)
+        assertSame(Seq.EMPTY_BYTES, out[0])
+        assertSame(Seq.EMPTY_BYTES, out[1])
+        assertContentEquals(byteArrayOf(9), out[2])
+    }
+
+    @Test
+    fun aRepeatedLeafIdReplacesRatherThanAppending() {
+        // §7.4: the last occurrence of an element id wins, and the array does not
+        // grow for it.
+        val out = mutableListOf<String>()
+        Seq.placeElem(out, 1, "", "first", NO_COUNT, RCAP)
+        Seq.placeElem(out, 1, "", "second", NO_COUNT, RCAP)
+        assertContentEquals(listOf("", "second"), out)
+    }
+
+    @Test
+    fun theLastIndexADeclaredCountAdmitsIsCapMinusOne() {
+        // A schema `count` is a CAPACITY, not a length (§7.1): the container starts
+        // empty and the wire carries the length, so count - 1 is the highest index
+        // and the array it produces is exactly that long.
+        val out = mutableListOf<String>()
+        Seq.placeElem(out, 4, "", "e4", 5, RCAP)
+        assertEquals(5, out.size)
+        assertEquals("e4", out[4])
+    }
+
+    @Test
+    fun aLeafIndexAtTheDeclaredCountIsInvalidAndTheListIsNotExtended() {
+        // The index is judged BEFORE any growth (§7.2 item 8): after a rejected id
+        // the container is not left partially extended, so a lower id delivered
+        // afterwards still lands at its own index.
+        val out = mutableListOf<String>()
+        val e = assertFailsWith<SofabException> { Seq.placeElem(out, 5, "", "over", 5, RCAP) }
+        assertEquals(SofabError.INVALID_MSG, e.error)
+        assertEquals(0, out.size, "rejected before the list grows")
+
+        Seq.placeElem(out, 1, "", "later", 5, RCAP)
+        assertContentEquals(listOf("", "later"), out)
+    }
+
+    @Test
+    fun anUncountedLeafIndexAboveTheReceiverCapIsLimitExceeded() {
+        // Where the schema leaves the array open the RECEIVER cap applies instead,
+        // and the verdict is the policy category: the bytes are well formed and the
+        // same element decodes for a receiver configured more loosely (§6.2.1,
+        // §6.3). Never both bounds — a cap never applies to a counted field.
+        val out = mutableListOf<ByteArray>()
+        val e = assertFailsWith<SofabException> {
+            Seq.placeElem(out, 4, Seq.EMPTY_BYTES, byteArrayOf(1), NO_COUNT, 4)
+        }
+        assertEquals(SofabError.LIMIT_EXCEEDED, e.error)
+        assertEquals(0, out.size, "rejected before the list grows")
+
+        // cap - 1 is the last index the same cap admits.
+        Seq.placeElem(out, 3, Seq.EMPTY_BYTES, byteArrayOf(1), NO_COUNT, 4)
+        assertEquals(4, out.size)
+    }
+
+    @Test
+    fun aCountedLeafArrayIgnoresTheReceiverCapEntirely() {
+        // §6.2.1: exactly one bound is in play, and the schema picks it. A cap of 1
+        // cannot touch a field the schema counts.
+        val out = mutableListOf<String>()
+        Seq.placeElem(out, 3, "", "e3", 4, 1)
+        assertEquals(4, out.size)
+    }
+
+    @Test
+    fun anUnstatedCapAdmitsNoLeafElementAndSaysArgument() {
+        // An omitted cap is not unlimited (§6.2.1) and not a small limit either: the
+        // mistake is in the CALL, so the category is ARGUMENT and not LIMIT_EXCEEDED.
+        val out = mutableListOf<String>()
+        val e = assertFailsWith<SofabException> { Seq.placeElem(out, 0, "", "e0", NO_COUNT, -1) }
+        assertEquals(SofabError.ARGUMENT, e.error)
+        assertEquals(0, out.size, "fail-closed: the list is not grown either")
+    }
+
+    @Test
+    fun aFramedElementIsMadeOncePerNewSlotAndTheGapsAreSeparateObjects() {
+        // A struct/union element is MUTABLE and decodes in place, so each slot needs
+        // its own object — one shared instance would alias every element of the
+        // array onto it.
+        var made = 0
+        val out = mutableListOf<MutableList<Long>>()
+        Seq.reserveElem(out, 2, NO_COUNT, RCAP) {
+            made++
+            mutableListOf()
+        }
+        assertEquals(3, out.size)
+        assertEquals(3, made, "one element per slot created")
+        out[2].add(7)
+        assertTrue(out[0].isEmpty(), "the gap fills are separate objects")
+    }
+
+    @Test
+    fun aReopenedFramedElementMergesRatherThanStartingOver() {
+        // §7.4 for a FRAMED element: its fields arrive one at a time and each is
+        // routed into the object the reservation made, so a re-opened element id
+        // must merge into what its earlier fields built. Replacing the slot would
+        // discard them — which is why this one differs from placeElem.
+        var made = 0
+        val out = mutableListOf<MutableList<Long>>()
+        Seq.reserveElem(out, 0, NO_COUNT, RCAP) {
+            made++
+            mutableListOf()
+        }
+        out[0].add(7)
+        val held = out[0]
+        Seq.reserveElem(out, 0, NO_COUNT, RCAP) {
+            made++
+            mutableListOf()
+        }
+        assertEquals(1, made, "the factory is not called for a slot already present")
+        assertSame(held, out[0])
+        assertContentEquals(listOf(7L), out[0])
+    }
+
+    @Test
+    fun aFramedElementIndexIsBoundedBeforeTheListGrowsToHoldIt() {
+        // The same ordering and the same two categories as the leaf path, and the
+        // factory must not run for a slot the bound refuses.
+        var made = 0
+        val make = {
+            made++
+            mutableListOf<Long>()
+        }
+
+        val counted = mutableListOf<MutableList<Long>>()
+        val ie = assertFailsWith<SofabException> { Seq.reserveElem(counted, 3, 3, RCAP, make) }
+        assertEquals(SofabError.INVALID_MSG, ie.error)
+        assertEquals(0, counted.size, "rejected before the list grows")
+
+        val uncounted = mutableListOf<MutableList<Long>>()
+        val le = assertFailsWith<SofabException> { Seq.reserveElem(uncounted, 4, NO_COUNT, 4, make) }
+        assertEquals(SofabError.LIMIT_EXCEEDED, le.error)
+        assertEquals(0, uncounted.size, "rejected before the list grows")
+
+        val ae = assertFailsWith<SofabException> { Seq.reserveElem(uncounted, 0, NO_COUNT, -1, make) }
+        assertEquals(SofabError.ARGUMENT, ae.error)
+        assertEquals(0, uncounted.size)
+
+        assertEquals(0, made, "no element is created for a refused index")
+    }
+
+    @Test
+    fun theIndexBoundIsAlsoAvailableOnItsOwnForTheLengthWord() {
+        // checkIndex is the same comparison with no reservation attached, for the
+        // one site that has none: a string or blob element's index is bounded at the
+        // LENGTH WORD, so that a message ending right there is refused rather than
+        // reported INCOMPLETE (§5.2) — before a single payload byte is kept.
+        Seq.checkIndex(4, 5, RCAP)
+        assertEquals(SofabError.INVALID_MSG, assertFailsWith<SofabException> { Seq.checkIndex(5, 5, RCAP) }.error)
+        assertEquals(
+            SofabError.LIMIT_EXCEEDED,
+            assertFailsWith<SofabException> { Seq.checkIndex(4, NO_COUNT, 4) }.error,
+        )
+        assertEquals(SofabError.ARGUMENT, assertFailsWith<SofabException> { Seq.checkIndex(0, NO_COUNT, -1) }.error)
+    }
+
+    @Test
+    fun anElementPayloadAboveItsMaxlenIsRefusedAtTheLengthWordAndPlacesNothing() {
+        // The two bounds a string element carries are separate and both are taken at
+        // the length word, in this order: the INDEX against the array's count, then
+        // the element's own maxlen against the announced length. Neither is the
+        // other's job — the index bound lives here, the length bound in PayloadAcc —
+        // and an over-long element must leave the destination untouched.
+        val maxlen = 4
+        val out = mutableListOf<String>()
+
+        Seq.checkIndex(1, 5, RCAP)
+        val e = assertFailsWith<SofabException> { PayloadAcc.checkStringLength(9, maxlen, RMAXLEN) }
+        assertEquals(SofabError.INVALID_MSG, e.error)
+        assertEquals(0, out.size, "refused at the length word, before any placement")
+
+        // The same element within its maxlen places normally.
+        PayloadAcc.checkStringLength(4, maxlen, RMAXLEN)
+        Seq.placeElem(out, 1, "", "abcd", 5, RCAP)
+        assertContentEquals(listOf("", "abcd"), out)
     }
 
     // -----------------------------------------------------------------------

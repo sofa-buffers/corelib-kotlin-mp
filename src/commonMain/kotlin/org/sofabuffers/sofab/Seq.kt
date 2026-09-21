@@ -33,6 +33,16 @@ package org.sofabuffers.sofab
  * `MutableList<ByteArray>` and a `MutableList<IntArray>` erase to the same JVM
  * signature — carry the element name in the member name instead.
  *
+ * **Three reservations, one shape.** Every wrapper array a schema can declare
+ * reaches this object through one of three calls, which differ only in what a
+ * slot holds: [placeElem] puts a decoded `string` or `blob` at the index its id
+ * names; [reserveElem] makes the slot a `struct`, `union` or nested-array element
+ * is routed into; [reserveRowBytes] and its peers reserve a matrix row. The
+ * schema dependence of all three is exactly a bound, an element type and an
+ * element default — an argument, a type parameter and an argument — which is the
+ * whole of why they fit here at all. [checkIndex] is that bound on its own,
+ * published for the one site that has no reservation to ride.
+ *
  * Two rules run through all of it. **Ids are positions** (MESSAGE_SPEC §5.1): an
  * array element's id *is* its index, an interior element equal to the element
  * default may be omitted, and the highest id present is what gives the decoded
@@ -42,10 +52,10 @@ package org.sofabuffers.sofab
  * follow, bounded by nothing until a schema `count` or a receiver limit bounds
  * it, so no function here allocates from a count alone.
  *
- * **A row index is untrusted too, and its two bounds travel as arguments.** A
- * matrix row's id *is* its index, so `reserveRow*` grows the outer list to
+ * **An element index is untrusted too, and its two bounds travel as arguments.**
+ * An array element's id *is* its index, so a placement grows the list to
  * `id + 1` and one over-index element is by itself the allocation an untrusted
- * index buys. Each takes the outer array's schema `count` and the deployment's
+ * index buys. Each call takes the array's schema `count` and the deployment's
  * receiver cap and rejects the id before the list grows — the count/index header,
  * the site CORELIB_PLAN §6.2.1 requires, reached through a call generated code
  * already makes. Both numbers are the **caller's**: supplied per call, used for
@@ -55,9 +65,18 @@ package org.sofabuffers.sofab
  * from touching the field at all, while an array the schema leaves uncounted is
  * bounded by the receiver cap and answers the `LIMIT_EXCEEDED` policy category
  * (§6.3). Nothing here holds, defaults to or clamps to a limit of its own — and a
- * call that states no cap at all admits no row either, reported as `ARGUMENT`,
- * the mistake being in the call rather than in a receiver policy nobody
- * configured.
+ * call that states no cap at all admits no element either, reported as
+ * `ARGUMENT`, the mistake being in the call rather than in a receiver policy
+ * nobody configured.
+ *
+ * **What these bounds do not cover.** A `string` or `blob` element's own `maxlen`
+ * is not one of these arguments: the payload arrives through the visitor's own
+ * callback and its length has to be judged at the **length word**, so that a
+ * message truncated right after that word is refused rather than reported
+ * `INCOMPLETE` (MESSAGE_SPEC §5.2). There is no reservation here for it to ride;
+ * [PayloadAcc.checkStringLength] and [PayloadAcc.string] own that half. Neither
+ * is the **count** of a native array or of a matrix row: `n` below is a length
+ * the caller has already bounded, and a native array reaches no call here at all.
  */
 public object Seq {
 
@@ -109,6 +128,125 @@ public object Seq {
     public val EMPTY_BOOLEANS: BooleanArray = BooleanArray(0)
 
     // -----------------------------------------------------------------------
+    // Element placement
+    // -----------------------------------------------------------------------
+
+    /**
+     * **Place a leaf element** — a wrapper array's `string` or `blob` — at the
+     * index its wire id names, growing the list and filling the gaps that omitted
+     * interior elements left (MESSAGE_SPEC §5.1, §2).
+     *
+     * Three rules of §5.1 sit in this one loop, and not one of them is visible in
+     * the bytes: two implementations can disagree about every one of them and
+     * still emit an identical message, which is why they are written here once
+     * instead of being re-emitted per schema (CORELIB_PLAN §7.2 item 8 asks for
+     * them separately for the same reason).
+     *
+     * - A missing id **fills a gap** with [def] rather than shifting every later
+     *   element down by one — an interior element equal to the element default is
+     *   omitted by a conformant encoder (§2).
+     * - The array's length is **highest present id + 1**, so growing to `id + 1`
+     *   per element is exactly right and no trailing fill is ever needed: the last
+     *   element is never elided.
+     * - A repeated id **replaces** rather than appends (§7.4), which an indexed
+     *   set does by construction and an `add` could not.
+     *
+     * **The index is bounded before the list grows** (§7.2 item 8), so a refused
+     * id leaves the list exactly as it was and a lower id delivered afterwards
+     * still lands at its own index. [cap] and [rcap] are the two numbers
+     * [checkIndex] chooses between, and exactly one of them can apply.
+     *
+     * **[def] is shared, not copied.** The gap value of an array of strings or
+     * blobs is `""` or [EMPTY_BYTES] — immutable, or zero-length and so with no
+     * state to share wrongly — so a gap costs no allocation. An element whose
+     * default is a *mutable* object belongs in [reserveElem] instead, which makes
+     * one per slot.
+     *
+     * This is not an `inline fun`: it takes no function argument, both element
+     * types it serves ([String] and [ByteArray]) are reference types that a single
+     * generic spans at no cost, and one shared body keeps the call sites small.
+     *
+     * @param out the destination list, which this grows
+     * @param id the element's wire id, which is its index
+     * @param def the element default, filling any gap below [id]
+     * @param value the decoded element
+     * @param cap the array's schema `count`, or a negative number where the schema
+     *     declares none
+     * @param rcap the receiver's configured `max_dyn_array_count`, applied only
+     *     where [cap] is negative; a negative [rcap] states no cap at all and
+     *     admits no element
+     * @param T element type
+     * @throws SofabException [SofabError.INVALID_MSG] when [id] reaches a declared
+     *     [cap]; [SofabError.LIMIT_EXCEEDED] when a schema-uncounted [id] reaches
+     *     a stated [rcap]; [SofabError.ARGUMENT] when a schema-uncounted array was
+     *     handed no cap at all ([rcap] negative)
+     */
+    public fun <T> placeElem(out: MutableList<T>, id: Int, def: T, value: T, cap: Int, rcap: Int) {
+        checkIndex(id, cap, rcap)
+        while (out.size <= id) out.add(def)
+        out[id] = value
+    }
+
+    /**
+     * **Reserve a framed element** — the slot a wrapper array's `struct`, `union`
+     * or nested-array element is routed into: bound the index, then grow the list
+     * to `id + 1`, giving each new slot its own element from [make]
+     * (MESSAGE_SPEC §5.1, §2).
+     *
+     * The same three rules as [placeElem] and the same ordering — the index is
+     * decided before the list grows (§7.2 item 8) — with one deliberate
+     * difference: **a slot already present is left alone**. A framed element's
+     * fields arrive one at a time and each is routed into the object this call
+     * reserved, so a re-opened element id must *merge* into what its earlier
+     * fields built rather than start the element again (§7.4); replacing the slot
+     * would discard them. That is also why nothing is handed back: generated code
+     * parks [id] in its own element-index register and reaches the element through
+     * the list on the field arms that follow.
+     *
+     * **A factory, not a shared default.** A struct, union or nested row is
+     * mutable and reachable by the caller, and an arriving element decodes *into*
+     * the object placed here, so one shared instance would alias every element of
+     * the array onto it — the single reason this is a second function rather than
+     * [placeElem] with one more argument.
+     *
+     * **Why this one is `inline`.** It is the signature with a function argument,
+     * and inlining is what makes that argument cost nothing: no lambda object is
+     * created, no `invoke` is dispatched, and the generated constructor call lands
+     * directly in the loop on JVM, JS and native alike. [make] comes last against
+     * the "bounds last" order the rest of this object keeps, because Kotlin's
+     * trailing-lambda syntax is what makes the call site read as a constructor.
+     *
+     * What this does **not** own is the **routing** — binding the element index,
+     * switching into the element's scope, emptying a re-opened nested row. That
+     * has a different shape per schema and stays generated. This owns growth and
+     * the bound, and stops at the slot.
+     *
+     * @param out the destination list, which this grows
+     * @param id the element's wire id, which is its index
+     * @param cap the array's schema `count`, or a negative number where the schema
+     *     declares none
+     * @param rcap the receiver's configured `max_dyn_array_count`, applied only
+     *     where [cap] is negative; a negative [rcap] states no cap at all and
+     *     admits no element
+     * @param make the element factory, called once per slot this creates
+     * @param T element type
+     * @throws SofabException [SofabError.INVALID_MSG] when [id] reaches a declared
+     *     [cap]; [SofabError.LIMIT_EXCEEDED] when a schema-uncounted [id] reaches
+     *     a stated [rcap]; [SofabError.ARGUMENT] when a schema-uncounted array was
+     *     handed no cap at all ([rcap] negative)
+     */
+    public inline fun <T> reserveElem(
+        out: MutableList<T>,
+        id: Int,
+        cap: Int,
+        rcap: Int,
+        make: () -> T,
+    ) {
+        checkIndex(id, cap, rcap)
+        while (out.size <= id) out.add(make())
+    }
+
+    // -----------------------------------------------------------------------
     // Row placement
     // -----------------------------------------------------------------------
 
@@ -149,7 +287,7 @@ public object Seq {
      *     handed no cap at all ([rcap] negative)
      */
     public fun reserveRowBytes(rows: MutableList<ByteArray>, id: Int, n: Int, cap: Int, rcap: Int): ByteArray {
-        boundIndex(id, cap, rcap)
+        checkIndex(id, cap, rcap)
         val row = ByteArray(n)
         while (rows.size < id) rows.add(EMPTY_BYTES)
         if (rows.size == id) rows.add(row) else rows[id] = row
@@ -167,7 +305,7 @@ public object Seq {
      * @return the new row, now at index [id]
      */
     public fun reserveRowShorts(rows: MutableList<ShortArray>, id: Int, n: Int, cap: Int, rcap: Int): ShortArray {
-        boundIndex(id, cap, rcap)
+        checkIndex(id, cap, rcap)
         val row = ShortArray(n)
         while (rows.size < id) rows.add(EMPTY_SHORTS)
         if (rows.size == id) rows.add(row) else rows[id] = row
@@ -185,7 +323,7 @@ public object Seq {
      * @return the new row, now at index [id]
      */
     public fun reserveRowInts(rows: MutableList<IntArray>, id: Int, n: Int, cap: Int, rcap: Int): IntArray {
-        boundIndex(id, cap, rcap)
+        checkIndex(id, cap, rcap)
         val row = IntArray(n)
         while (rows.size < id) rows.add(EMPTY_INTS)
         if (rows.size == id) rows.add(row) else rows[id] = row
@@ -203,7 +341,7 @@ public object Seq {
      * @return the new row, now at index [id]
      */
     public fun reserveRowLongs(rows: MutableList<LongArray>, id: Int, n: Int, cap: Int, rcap: Int): LongArray {
-        boundIndex(id, cap, rcap)
+        checkIndex(id, cap, rcap)
         val row = LongArray(n)
         while (rows.size < id) rows.add(EMPTY_LONGS)
         if (rows.size == id) rows.add(row) else rows[id] = row
@@ -221,7 +359,7 @@ public object Seq {
      * @return the new row, now at index [id]
      */
     public fun reserveRowUBytes(rows: MutableList<UByteArray>, id: Int, n: Int, cap: Int, rcap: Int): UByteArray {
-        boundIndex(id, cap, rcap)
+        checkIndex(id, cap, rcap)
         val row = UByteArray(n)
         while (rows.size < id) rows.add(EMPTY_UBYTES)
         if (rows.size == id) rows.add(row) else rows[id] = row
@@ -239,7 +377,7 @@ public object Seq {
      * @return the new row, now at index [id]
      */
     public fun reserveRowUShorts(rows: MutableList<UShortArray>, id: Int, n: Int, cap: Int, rcap: Int): UShortArray {
-        boundIndex(id, cap, rcap)
+        checkIndex(id, cap, rcap)
         val row = UShortArray(n)
         while (rows.size < id) rows.add(EMPTY_USHORTS)
         if (rows.size == id) rows.add(row) else rows[id] = row
@@ -257,7 +395,7 @@ public object Seq {
      * @return the new row, now at index [id]
      */
     public fun reserveRowUInts(rows: MutableList<UIntArray>, id: Int, n: Int, cap: Int, rcap: Int): UIntArray {
-        boundIndex(id, cap, rcap)
+        checkIndex(id, cap, rcap)
         val row = UIntArray(n)
         while (rows.size < id) rows.add(EMPTY_UINTS)
         if (rows.size == id) rows.add(row) else rows[id] = row
@@ -275,7 +413,7 @@ public object Seq {
      * @return the new row, now at index [id]
      */
     public fun reserveRowULongs(rows: MutableList<ULongArray>, id: Int, n: Int, cap: Int, rcap: Int): ULongArray {
-        boundIndex(id, cap, rcap)
+        checkIndex(id, cap, rcap)
         val row = ULongArray(n)
         while (rows.size < id) rows.add(EMPTY_ULONGS)
         if (rows.size == id) rows.add(row) else rows[id] = row
@@ -293,7 +431,7 @@ public object Seq {
      * @return the new row, now at index [id]
      */
     public fun reserveRowFloats(rows: MutableList<FloatArray>, id: Int, n: Int, cap: Int, rcap: Int): FloatArray {
-        boundIndex(id, cap, rcap)
+        checkIndex(id, cap, rcap)
         val row = FloatArray(n)
         while (rows.size < id) rows.add(EMPTY_FLOATS)
         if (rows.size == id) rows.add(row) else rows[id] = row
@@ -311,7 +449,7 @@ public object Seq {
      * @return the new row, now at index [id]
      */
     public fun reserveRowDoubles(rows: MutableList<DoubleArray>, id: Int, n: Int, cap: Int, rcap: Int): DoubleArray {
-        boundIndex(id, cap, rcap)
+        checkIndex(id, cap, rcap)
         val row = DoubleArray(n)
         while (rows.size < id) rows.add(EMPTY_DOUBLES)
         if (rows.size == id) rows.add(row) else rows[id] = row
@@ -329,7 +467,7 @@ public object Seq {
      * @return the new row, now at index [id]
      */
     public fun reserveRowBooleans(rows: MutableList<BooleanArray>, id: Int, n: Int, cap: Int, rcap: Int): BooleanArray {
-        boundIndex(id, cap, rcap)
+        checkIndex(id, cap, rcap)
         val row = BooleanArray(n)
         while (rows.size < id) rows.add(EMPTY_BOOLEANS)
         if (rows.size == id) rows.add(row) else rows[id] = row
@@ -362,7 +500,7 @@ public object Seq {
      *     handed no cap at all ([rcap] negative)
      */
     public fun <T> reserveRowList(rows: MutableList<MutableList<T>>, id: Int, cap: Int, rcap: Int) {
-        boundIndex(id, cap, rcap)
+        checkIndex(id, cap, rcap)
         while (rows.size < id) rows.add(mutableListOf())
         if (rows.size == id) {
             rows.add(mutableListOf())
@@ -371,14 +509,26 @@ public object Seq {
         rows[id].clear()
     }
 
+    // -----------------------------------------------------------------------
+    // The index bound
+    // -----------------------------------------------------------------------
+
     /**
-     * Reject a row index the caller may not accept, before the list is grown to
-     * hold it (CORELIB_PLAN §6.2.1).
+     * Reject an element index the caller may not accept, before the list is grown
+     * to hold it (CORELIB_PLAN §6.2.1).
+     *
+     * Every placement here runs this first — [placeElem], [reserveElem] and every
+     * `reserveRow*` — and it is public for the one site that has **no reservation
+     * to ride**: a generated `fixlenBegin` arm bounds a `string` or `blob`
+     * element's index at the **length word**, so that a message ending right there
+     * is refused rather than reported `INCOMPLETE` (MESSAGE_SPEC §5.2). The
+     * placement that follows re-runs it, which costs one comparison against a
+     * folded constant and spares the two sites from having to agree by inspection.
      *
      * Exactly one of the two numbers applies, and the schema picks which — the
      * bound and the category are one decision with two answers, which is why they
      * are one comparison here rather than two guards in the caller. A declared
-     * [cap] is the outer array's schema `count`: an element past it contradicts
+     * [cap] is the array's schema `count`: an element past it contradicts
      * the schema both peers agreed on, so it is malformed input (MESSAGE_SPEC
      * §7.1) and the receiver cap must not be applied to that field at all. An
      * array the schema leaves uncounted grows to *highest present id + 1* by
@@ -392,11 +542,21 @@ public object Seq {
      * comparison and are not retained; nothing here defaults, invents or clamps to
      * a limit, and an over-index element is rejected, never dropped or folded into
      * a lower slot.
+     *
+     * @param id the element's wire id, which is its index
+     * @param cap the array's schema `count`, or a negative number where the schema
+     *     declares none
+     * @param rcap the receiver's configured `max_dyn_array_count`, applied only
+     *     where [cap] is negative
+     * @throws SofabException [SofabError.INVALID_MSG] when [id] reaches a declared
+     *     [cap]; [SofabError.LIMIT_EXCEEDED] when a schema-uncounted [id] reaches
+     *     a stated [rcap]; [SofabError.ARGUMENT] when a schema-uncounted array was
+     *     handed no cap at all ([rcap] negative)
      */
-    private fun boundIndex(id: Int, cap: Int, rcap: Int) {
+    public fun checkIndex(id: Int, cap: Int, rcap: Int) {
         if (cap >= 0) {
             if (id >= cap) {
-                throw SofabException(SofabError.INVALID_MSG, "row index $id above declared count $cap")
+                throw SofabException(SofabError.INVALID_MSG, "array index $id above declared count $cap")
             }
         } else if (id >= rcap) {
             refuse(id, rcap)
@@ -420,13 +580,13 @@ public object Seq {
      * `InvalidArgument`). Reporting that as `LIMIT_EXCEEDED` would name a receiver
      * policy the deployment never set and promise a limit to raise that does not
      * exist. The refusal itself is the same either way: §6.2.1 forbids reading an
-     * omitted cap as *unlimited*, so an unstated cap still admits no row.
+     * omitted cap as *unlimited*, so an unstated cap still admits no element.
      */
     private fun refuse(id: Int, rcap: Int): Nothing {
         if (rcap < 0) {
-            throw SofabException(SofabError.ARGUMENT, "max_dyn_array_count not stated (cap $rcap) for row index $id")
+            throw SofabException(SofabError.ARGUMENT, "max_dyn_array_count not stated (cap $rcap) for array index $id")
         }
-        throw SofabException(SofabError.LIMIT_EXCEEDED, "row index $id above configured limit $rcap")
+        throw SofabException(SofabError.LIMIT_EXCEEDED, "array index $id above configured limit $rcap")
     }
 
     // -----------------------------------------------------------------------

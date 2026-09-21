@@ -257,6 +257,9 @@ package.
 
 | symbol | what it is |
 |---|---|
+| `Seq.placeElem` | place a decoded `string` or `blob` element at the index its id names, filling a gap an omitted interior element left rather than shifting every later element down, and replacing on a repeated id (MESSAGE_SPEC §5.1 / §7.4) — bounding that index first, against the caller's schema `count` (`INVALID_MSG`) or, where the schema declares none, the caller's receiver cap (`LIMIT_EXCEEDED`) |
+| `Seq.reserveElem` | the same placement for a framed element (`struct`, `union`, nested array): grow to the index, giving each new slot its own element from the factory, and leave a slot already present alone so a re-opened element id merges into what its earlier fields built |
+| `Seq.checkIndex` | that index bound on its own, for the one site with no reservation to ride: a `string` / `blob` element's index at the **length word**, so that a message ending right there is refused rather than reported `INCOMPLETE` (§5.2) |
 | `Seq.reserveRowBytes` … `reserveRowBooleans`, `Seq.reserveRowList` | place a matrix row at the index its element id names, filling a gap with the empty row rather than shifting every later row down (MESSAGE_SPEC §5.1 / §7.4) — bounding that index first, against the caller's schema `count` (`INVALID_MSG`) or, where the schema declares none, the caller's receiver cap (`LIMIT_EXCEEDED`) |
 | `Seq.ensureCap` (one overload per array type) | the array-growth policy: double, stop at the announced count, and never allocate from a count the wire claimed but has not delivered |
 | `Seq.ARRAY_INIT_CAP`, `Seq.EMPTY_BYTES` … `EMPTY_BOOLEANS` | the bounded first reservation, and the shared zero-length arrays a field initializer points at |
