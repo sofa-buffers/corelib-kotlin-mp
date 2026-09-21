@@ -34,14 +34,17 @@ import kotlin.test.assertTrue
  * `expect`: container length and outcome only, no allocator instrumentation, which
  * is what makes the cases portable across the family.
  *
- * **What this port owns.** The struct cases run through [Seq.reserveRowList], this
- * library's own wrapper-array placement: it bounds the element index before the
- * list grows (§6.2.1), fills a gap with the empty row rather than shifting later
- * rows down, and replaces rather than merges. A struct element here is a framed
- * sub-sequence carrying one unsigned field, which is exactly a row holding one
- * value. The string cases have no such helper — a `MutableList<String>`
- * destination is placed by generated code — so that path states the same contract
- * itself, standing in for the generated layer.
+ * **What this port owns.** Both element kinds run through this library's own
+ * wrapper-array placement, which is where the contract lives rather than in the
+ * destination below. The struct cases use [Seq.reserveRowList]: it bounds the
+ * element index before the list grows (§6.2.1), fills a gap with the empty row
+ * rather than shifting later rows down, and replaces rather than merges. A struct
+ * element here is a framed sub-sequence carrying one unsigned field, which is
+ * exactly a row holding one value. The string cases use the leaf pair —
+ * [Seq.checkIndex] at the length word, where a message that ends right there is
+ * still refused, and [Seq.placeElem] once the payload is whole — which is the two
+ * calls generated code makes for a `string` element, taking the one bound at the
+ * two points it has to hold.
  *
  * The destination reads its length off the **container** rather than from a counter
  * beside it. A counter updated only after a successful placement reports the right
@@ -168,21 +171,15 @@ class SequenceGrowthTest {
             // The index is bounded at the FIRST piece, before any payload is kept:
             // a rejection must not depend on the payload arriving whole.
             if (offset == 0) {
-                if (id >= CAP) {
-                    throw SofabException(
-                        SofabError.LIMIT_EXCEEDED,
-                        "array element index $id above configured limit $CAP",
-                    )
-                }
-                // MESSAGE_SPEC §5.1: every destination slot is initialised to its
-                // ELEMENT DEFAULT before the array is applied — "" for a string.
-                // Only a gap case ever looks at a slot nothing was written to.
-                while (strings.size <= id) strings.add("")
+                Seq.checkIndex(id, NO_SCHEMA_COUNT, CAP)
                 payload = ByteArray(total)
             }
             data.copyInto(payload, offset, chunkOffset, chunkOffset + chunkLength)
             if (offset + chunkLength == total) {
-                strings[id] = payload.decodeToString()
+                // The same bound again, and with it MESSAGE_SPEC §5.1: the element
+                // lands at the index its id names, any gap below it holds the
+                // ELEMENT DEFAULT — "" for a string — and a repeated id replaces.
+                Seq.placeElem(strings, id, "", payload.decodeToString(), NO_SCHEMA_COUNT, CAP)
             }
         }
 
