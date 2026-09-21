@@ -361,6 +361,27 @@ class SeqTest {
         assertContentEquals(listOf("", "abcd"), out)
     }
 
+    @Test
+    fun aBlobElementAboveItsMaxlenIsRefusedAtTheLengthWordAndPlacesNothing() {
+        // The blob twin, and its uncounted half: a declared maxlen is a validity
+        // verdict (INVALID_MSG), while a blob element the schema leaves unbounded is
+        // held to the receiver's max_dyn_blob_len and answers LIMIT_EXCEEDED —
+        // exactly one of the two, never both (§6.2.1).
+        val out = mutableListOf<ByteArray>()
+
+        Seq.checkIndex(0, 3, RCAP)
+        val ie = assertFailsWith<SofabException> { PayloadAcc.checkBlobLength(5, 4, RMAXLEN) }
+        assertEquals(SofabError.INVALID_MSG, ie.error)
+        val le = assertFailsWith<SofabException> { PayloadAcc.checkBlobLength(5, -1, 4) }
+        assertEquals(SofabError.LIMIT_EXCEEDED, le.error)
+        // A declared maxlen admits its own length and ignores a smaller receiver cap.
+        PayloadAcc.checkBlobLength(4, 4, 1)
+        assertEquals(0, out.size, "refused at the length word, before any placement")
+
+        Seq.placeElem(out, 0, Seq.EMPTY_BYTES, byteArrayOf(1, 2, 3, 4), 3, RCAP)
+        assertEquals(1, out.size)
+    }
+
     // -----------------------------------------------------------------------
     // Row placement
     // -----------------------------------------------------------------------
