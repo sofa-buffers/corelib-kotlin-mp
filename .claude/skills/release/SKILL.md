@@ -11,6 +11,9 @@ This follows the convention every SofaBuffers corelib uses (corelib-java, -rs, -
 
 - **The git tag `vX.Y.Z` is the source of truth.** Every file that states the
   version must already say `X.Y.Z` on the commit the tag points at.
+- **Tag format: a lowercase `v` followed by the semver version**, e.g. `v1.2.3`.
+  Never `1.2.3`, `V1.2.3` or `release-1.2.3`. The files themselves carry the bare
+  `X.Y.Z`, without the `v`.
 - **Pre-1.0 semver:** a *minor* bump may break the API or the wire output; a *patch*
   bump must not.
 - **The family moves together.** The other corelibs release as a group under one
@@ -146,9 +149,11 @@ wait until the `CI` run for that exact SHA is green:
 ## 7. Tag and GitHub Release (confirm first)
 
 ```bash
-git tag -a vX.Y.Z -m "vX.Y.Z" "$(git rev-parse HEAD)"
-git push origin vX.Y.Z
-gh release create vX.Y.Z --verify-tag --title vX.Y.Z --notes-file <notes.md>
+TAG=vX.Y.Z
+[[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || { echo "bad tag: $TAG"; exit 1; }
+git tag -a "$TAG" -m "$TAG" "$(git rev-parse HEAD)"
+git push origin "$TAG"
+gh release create "$TAG" --verify-tag --title "$TAG" --notes-file <notes.md>
 ```
 
 Release notes use the family's shape (see
