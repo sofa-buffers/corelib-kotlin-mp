@@ -1,0 +1,89 @@
+name: "Version consistency"
+
+# The git tag is the source of truth for the version: every file that states
+# the version must already carry it on the commit the tag points at. Modelled
+# on corelib-c-cpp's workflow of the same name. This repo has two such files
+# (the /release skill lists the same two), and each gets its own step:
+#
+#   build.gradle.kts  the Gradle project version, which the Maven publications
+#                     and the Dokka site take their version from
+#   README.md         the dependency coordinate a consumer copies; nothing else
+#                     tests it, and corelib-java shipped v0.10.0 with it stale
+#
+# Tags only: the comparison is only meaningful when there is a tag to compare
+# against. Between releases the files may legitimately sit ahead of the newest
+# tag, so running this on every push and pull request would produce noise, not
+# signal, and cost a runner slot per run.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  check-versions:
+    name: Check versions
+    runs-on: ubuntu-latest
+    # Checkout plus a few greps: seconds. The floor the family's workflows use,
+    # so a wedged job cannot hold one of the account's 20 Actions slots for
+    # GitHub's six-hour default.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+
+      # The tag's own shape comes first: a lowercase `v`, then semver
+      # (v1.2.3, optionally with a prerelease suffix). `v*` also matches `v1.2`
+      # or `vnext`, and those must fail here, by name, rather than as a
+      # confusing mismatch in a later step.
+      - name: Reference version (git tag)
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="$GITHUB_REF_NAME"
+          [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]] || {
+            echo "::error::tag '$tag' is not a lowercase 'v' followed by semver (e.g. v1.2.3)"; exit 1; }
+          echo "REF_VERSION=${tag#v}" >> "$GITHUB_ENV"
+          echo "tag=$tag  version=${tag#v}"
+
+      # The project's own `version = "..."` sits at the top level of the script,
+      # so it starts at column 0. A plugin's or a dependency's version is
+      # indented or written as `version "..."`, so the anchored pattern cannot
+      # pick one of those up. Exactly one match: zero means the line moved or
+      # changed shape, and two would leave it unclear which one Gradle uses.
+      - name: Check Gradle (build.gradle.kts)
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t found < <(grep -oP '^version\s*=\s*"\K[^"]+' build.gradle.kts || true)
+          [[ ${#found[@]} -eq 1 ]] || {
+            echo "::error file=build.gradle.kts::expected exactly one top-level 'version = \"...\"', found ${#found[@]}"; exit 1; }
+          echo "build.gradle.kts=${found[0]}"
+          [[ "${found[0]}" == "$REF_VERSION" ]] || {
+            echo "::error file=build.gradle.kts::version '${found[0]}' != tag '$REF_VERSION'"; exit 1; }
+
+      # Every coordinate the README states, not just the first: a second one
+      # added later (a Maven snippet next to the Gradle one, say) is checked too.
+      # At least one: the README is required to show how to depend on the
+      # library (CORELIB_PLAN §9).
+      - name: Check README (dependency coordinate)
+        if: ${{ !cancelled() }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t found < <(grep -noP 'org\.sofabuffers:corelib-kotlin-mp[^:"]*:\K[^"<[:space:]]+' README.md || true)
+          [[ ${#found[@]} -ge 1 ]] || {
+            echo "::error file=README.md::no 'org.sofabuffers:corelib-kotlin-mp:<version>' coordinate found"; exit 1; }
+          bad=0
+          for hit in "${found[@]}"; do
+            line="${hit%%:*}" version="${hit#*:}"
+            echo "README.md:$line=$version"
+            [[ "$version" == "$REF_VERSION" ]] || {
+              echo "::error file=README.md,line=$line::coordinate version '$version' != tag '$REF_VERSION'"; bad=1; }
+          done
+          exit "$bad"

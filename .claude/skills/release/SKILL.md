@@ -73,8 +73,11 @@ done
 
 ## 3. Bump every place that states the version
 
-Only two places state it. Nothing tests the README one, and corelib-java shipped
-v0.10.0 with a stale README for exactly that reason. Update both in the same commit:
+Only two places state it, and both are gated: on every `v*` tag,
+`.github/workflows/version-consistency.yml` fails if either one differs from the
+tag. That gate only runs **after** the tag is pushed, though, so get both right
+here, in the same commit. (corelib-java shipped v0.10.0 with its README still
+stating the old version.)
 
 | File | What to change |
 |---|---|
@@ -87,10 +90,11 @@ Then look for anything that still carries the old number:
 git grep -nF "$OLD" -- ':!assets/test_vectors.json'
 ```
 
-Every match left over is either a place to add to this table (update the table in
-this skill too) or something unrelated, such as a dependency version. Plugin,
-dependency and toolchain versions are **not** part of a release. Renovate handles
-them.
+Every match left over is either something unrelated or a new place that states the
+version. A new place goes into this table **and** gets a step of its own in
+`version-consistency.yml`, so the two lists stay the same. Plugin, dependency and
+toolchain versions are unrelated: they are **not** part of a release, and Renovate
+handles them.
 
 While `README.md` is open, check what CORELIB_PLAN §9 requires: every version,
 command and API name it states must match the code as it stands.
@@ -183,8 +187,13 @@ the library is and what it conforms to instead of a "breaking since" list.
 - **Nothing is published to a package registry.** `maven-publish` is applied, but no
   repository is configured and no workflow publishes. Tell the user plainly that the
   release is a tag plus a GitHub Release; never claim the artifact is on Maven
-  Central. If `release.yml` or `version-consistency.yml` has been added since this
-  skill was written, watch those runs on the tag and report how they ended.
+  Central. If a `release.yml` has been added since this skill was written, watch
+  that run on the tag as well.
+- Watch the `Version consistency` run for the tag and report how it ended:
+  `gh run list --workflow version-consistency.yml --branch "$TAG"` (for a tag
+  push, `--branch` takes the tag name). If it is red, the release is wrong. Fix the
+  files in a PR, then delete the tag and the release and tag again. Tell the user
+  before deleting anything, because the tag is already public.
 - The `release/vX.Y.Z` branch is deleted on merge (the repo setting is on). Delete
   the local branch with `git branch -D release/vX.Y.Z` (`-D`, because rebase-merged
   commits do not count as merged).
