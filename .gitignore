@@ -16,4 +16,6 @@ local.properties
 .vscode/
 
 # Claude Code's local session state and worktrees, never part of the library.
-.claude/
+# Project skills are the exception: they are shared repo tooling (e.g. /release).
+.claude/*
+!.claude/skills/
