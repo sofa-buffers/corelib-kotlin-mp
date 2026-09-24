@@ -53,7 +53,7 @@ builds and tests.
 ```kotlin
 // settings/build.gradle.kts of the consuming project
 dependencies {
-    implementation("org.sofabuffers:corelib-kotlin-mp:0.1.0")
+    implementation("org.sofabuffers:corelib-kotlin-mp:0.11.0")
 }
 ```
 
