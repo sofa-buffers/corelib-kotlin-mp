@@ -127,6 +127,35 @@ public object Seq {
     /** The shared empty [BooleanArray]; see [EMPTY_BYTES]. */
     public val EMPTY_BOOLEANS: BooleanArray = BooleanArray(0)
 
+    /**
+     * The raw-bits view of the fp32 array [a] for [putFp32Bits]: an [IntArray]
+     * over the same storage where the target needs one (Kotlin/JS, whose floats
+     * are doubles), `null` where a `Float` holds every pattern (JVM, Native).
+     * Taken once per array, at its `arrayBegin`, so no element pays for it.
+     */
+    public fun fp32BitsView(a: FloatArray): IntArray? = org.sofabuffers.sofab.fp32BitsView(a)
+
+    /**
+     * Store the fp32 element [bits] — the pattern [Visitor.fp32Bits] delivers — at
+     * index [i] of [a], unchanged: through [view] (from [fp32BitsView]) where there
+     * is one, as `Float.fromBits(bits)` where there is not. Either way a signaling
+     * NaN keeps its quiet bit clear (CORELIB_PLAN §6.5), and
+     * [OStream.writeArrayFp32] writes it back bit for bit.
+     */
+    @Suppress("NOTHING_TO_INLINE")
+    public inline fun putFp32Bits(a: FloatArray, view: IntArray?, i: Int, bits: Int) {
+        if (view != null) view[i] = bits else a[i] = Float.fromBits(bits)
+    }
+
+    /**
+     * [bits] if it is an fp32 NaN pattern, `null` otherwise: what a message keeps
+     * beside a decoded fp32 SCALAR so that [OStream.writeFp32] (value, raw bits)
+     * re-emits a signaling NaN unchanged. Every other pattern round-trips through
+     * the `Float` itself, so nothing is kept for it.
+     */
+    @Suppress("NOTHING_TO_INLINE")
+    public inline fun fp32NaNBits(bits: Int): Int? = if ((bits and 0x7FFF_FFFF) > 0x7F80_0000) bits else null
+
     // -----------------------------------------------------------------------
     // Element placement
     // -----------------------------------------------------------------------

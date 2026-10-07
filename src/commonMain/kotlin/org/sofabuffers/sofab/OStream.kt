@@ -508,6 +508,24 @@ public class OStream(
     }
 
     /**
+     * Write a 32-bit float field whose decoded wire bits were kept beside it:
+     * [rawBits] is written when [value] is still a NaN, [value] otherwise.
+     *
+     * On Kotlin/JS a decoded signaling NaN reaches a `Float` quieted, so a
+     * message that re-encodes bit for bit (CORELIB_PLAN §6.5) keeps the wire
+     * pattern next to the value. The pattern only ever stands in for a NaN: a
+     * value assigned over the decoded one is not a NaN unless the caller made it
+     * one, and every non-NaN `Float` already carries its exact bits.
+     *
+     * @param id field id
+     * @param value the value
+     * @param rawBits the bits the value was decoded from, or `null`
+     */
+    public fun writeFp32(id: Int, value: Float, rawBits: Int?) {
+        if (rawBits != null && value.isNaN()) writeFp32Bits(id, rawBits) else writeFp32Bits(id, value.toRawBits())
+    }
+
+    /**
      * Write a 32-bit float field from its **raw wire bits** — the IEEE-754 binary32
      * bit pattern, little-endian on the wire.
      *
@@ -949,6 +967,13 @@ public class OStream(
      * @param data elements
      */
     public fun writeArrayFp32(id: Int, data: FloatArray) {
+        // Where a float element is a double (Kotlin/JS), reading one would quiet a
+        // signaling NaN: the patterns go out through the raw-bits view instead.
+        val view = fp32BitsView(data)
+        if (view != null) {
+            writeArrayFp32Bits(id, view)
+            return
+        }
         writeArrayHeader(id, T_FIXLENARRAY, data.size)
         // §4.8: a fixlen array always carries its fixlen_word (the shared element
         // subtype/width), even when empty, so an empty fp32 array is

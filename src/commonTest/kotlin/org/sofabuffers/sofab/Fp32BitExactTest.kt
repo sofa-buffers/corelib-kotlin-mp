@@ -132,4 +132,58 @@ class Fp32BitExactTest {
             assertEquals(b, got, "fp64 ${b.toString(16)}")
         }
     }
+
+    /**
+     * The shape generated code uses for an fp32 ARRAY field: the elements land in
+     * a [FloatArray] through [Seq.putFp32Bits] (with the view taken once, at the
+     * array's start) and go back out through [OStream.writeArrayFp32]. On
+     * Kotlin/JS a Float is a double, so this is the path that must not form one.
+     */
+    @Test
+    fun aFloatArrayFilledThroughTheViewReEncodesBitForBit() {
+        val wire = encode(256) { it.writeArrayFp32Bits(2, patterns) }
+        val floats = FloatArray(patterns.size)
+        val view = Seq.fp32BitsView(floats)
+        var i = 0
+        IStream().feed(wire, object : Visitor {
+            override fun fp32Bits(id: Int, bits: Int) {
+                Seq.putFp32Bits(floats, view, i++, bits)
+            }
+        })
+        assertEquals(patterns.size, i)
+        assertContentEquals(wire, encode(256) { it.writeArrayFp32(2, floats) })
+        // The view, where there is one, is the storage: what it holds is what
+        // the array holds, so an element assigned by value is seen through it.
+        floats[0] = 1.5f
+        val again = encode(256) { it.writeArrayFp32(2, floats) }
+        assertContentEquals(
+            encode(256) { it.writeArrayFp32Bits(2, intArrayOf(1.5f.toRawBits()) + patterns.copyOfRange(1, patterns.size)) },
+            again,
+        )
+    }
+
+    /**
+     * The shape generated code uses for an fp32 SCALAR field: the value, plus the
+     * decoded bits kept beside it, and [OStream.writeFp32] with both. The bits
+     * stand in only while the value is still a NaN.
+     */
+    @Test
+    fun aScalarKeptBesideItsBitsReEncodesBitForBit() {
+        for (bits in patterns) {
+            val wire = encode { it.writeFp32Bits(1, bits) }
+            var value = 0f
+            var raw: Int? = null
+            IStream().feed(wire, object : Visitor {
+                override fun fp32Bits(id: Int, bits: Int) {
+                    value = Float.fromBits(bits)
+                    raw = Seq.fp32NaNBits(bits)
+                    assertEquals(value.isNaN(), raw != null, "fp32NaNBits, ${bits.toString(16)}")
+                }
+            })
+            assertContentEquals(wire, encode { it.writeFp32(1, value, raw) }, "re-encode, ${bits.toString(16)}")
+            // A value assigned over the decoded one wins; the kept bits are ignored.
+            assertContentEquals(encode { it.writeFp32(1, 1.5f) }, encode { it.writeFp32(1, 1.5f, raw) })
+        }
+        assertContentEquals(encode { it.writeFp32(1, 2.5f) }, encode { it.writeFp32(1, 2.5f, null) })
+    }
 }
