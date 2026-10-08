@@ -7,7 +7,7 @@ import org.jetbrains.kotlin.gradle.ExperimentalKotlinGradlePluginApi
 import org.jetbrains.kotlin.gradle.dsl.JvmTarget
 
 plugins {
-    kotlin("multiplatform") version "2.4.20"
+    kotlin("multiplatform") version "2.4.21"
     id("org.jetbrains.kotlinx.kover") version "0.9.11"
     id("org.jetbrains.dokka") version "2.2.0"
     `maven-publish`
