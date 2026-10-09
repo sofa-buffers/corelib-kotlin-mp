@@ -255,7 +255,9 @@ class EncoderTest {
     @Test
     fun boundedStringOverItsMaxlenIsRefusedBeforeAnyByte() {
         // Over by one ASCII byte, over by many (taking the chars-only early
-        // refusal), and over only once measured in UTF-8 bytes: 3 chars, 5 bytes.
+        // refusal), and over only once measured in UTF-8 bytes: "xxx\u00e9" is
+        // 4 chars / 5 bytes at maxlen 4, "\u00e9\u00e9\u00e9" is 3 chars / 6 bytes
+        // at maxlen 5.
         // A pair of surrogates counts four bytes, not two chars. A negative
         // maxlen refuses even the empty string.
         val long = "x".repeat(200)
