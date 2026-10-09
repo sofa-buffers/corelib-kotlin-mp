@@ -235,6 +235,62 @@ class EncoderTest {
     }
 
     @Test
+    fun boundedStringAtItsMaxlenIsWrittenAsUnbounded() {
+        // ASCII, two-byte and four-byte text exactly at the bound: the same bytes
+        // the unbounded write produces, through both the bulk ASCII path (long
+        // enough to take it) and the char loop.
+        val long = "x".repeat(200)
+        for ((text, maxlen) in listOf(
+            "" to 0, "abcd" to 4, "\u00e9\u00e9" to 4, "a\u20ac" to 4,
+            "\ud834\udd1e" to 4, long to 200,
+        )) {
+            assertEquals(
+                hex(encode { it.writeString(3, text) }),
+                hex(encode { it.writeString(3, text, maxlen) }),
+                "maxlen $maxlen",
+            )
+        }
+    }
+
+    @Test
+    fun boundedStringOverItsMaxlenIsRefusedBeforeAnyByte() {
+        // Over by one ASCII byte, over by many (taking the chars-only early
+        // refusal), and over only once measured in UTF-8 bytes: 3 chars, 5 bytes.
+        // A pair of surrogates counts four bytes, not two chars. A negative
+        // maxlen refuses even the empty string.
+        val long = "x".repeat(200)
+        for ((text, maxlen) in listOf(
+            "xxxxx" to 4, long to 199, "xxx\u00e9" to 4, "\u00e9\u00e9\u00e9" to 5,
+            "a\ud834\udd1e" to 4, "" to -1,
+        )) {
+            val buf = ByteArray(512)
+            val os = OStream(buf)
+            os.writeUnsigned(0, 1)
+            val before = os.bytesUsed
+            val e = assertFailsWith<SofabException>("maxlen $maxlen") { os.writeString(1, text, maxlen) }
+            assertEquals(SofabError.ARGUMENT, e.error)
+            assertEquals(before, os.bytesUsed, "nothing is written before the value is judged")
+        }
+    }
+
+    @Test
+    fun boundedStringStillRefusesAnUnpairedSurrogate() {
+        val e = assertFailsWith<SofabException> { encode { it.writeString(0, "a" + Char(0xD800), 10) } }
+        assertEquals(SofabError.ARGUMENT, e.error)
+    }
+
+    @Test
+    fun boundedStringStreamsThroughASmallBuffer() {
+        // The bound changes nothing about the flushing write path.
+        val text = "\u00e9".repeat(40) + "x".repeat(60)
+        val acc = PayloadAcc()
+        val os = OStream(ByteArray(Sofab.MIN_OUTPUT_BUFFER), 0, acc)
+        os.writeString(2, text, 140)
+        os.flush()
+        assertEquals(hex(encode { it.writeString(2, text) }), hex(acc.toByteArray()))
+    }
+
+    @Test
     fun byteContainerStringEntryPointValidates() {
         // writeFixlen(STRING) is the raw-bytes door and carries the same obligation.
         val e = assertFailsWith<SofabException> {

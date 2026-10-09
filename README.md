@@ -316,7 +316,11 @@ direction.
   array, and is **always strict**: a Kotlin `String` is a Unicode string type, so
   the only value it can hold that is not well-formed UTF-8 is an unpaired
   surrogate, and such a string is refused with `ARGUMENT` **before** any byte is
-  written, never lossily replaced. The byte-container door,
+  written, never lossily replaced. `writeString(id, text, maxlen)` adds the
+  caller's byte bound to that same measuring pass: a string whose UTF-8 encoding
+  is longer than `maxlen` bytes is refused with `ARGUMENT` before any byte is
+  written, never cut. The codec holds no bound of its own; generated code passes
+  the schema's `maxlen`. The byte-container door,
   `writeFixlen(id, data, from, length, FixlenType.STRING)`, validates its range with
   `Utf8.valid` and refuses a malformed payload the same way; `FixlenType.BLOB` is
   the type for opaque bytes and is never validated.

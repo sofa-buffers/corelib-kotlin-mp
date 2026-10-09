@@ -630,7 +630,32 @@ public class OStream(
      *   surrogate (invalid UTF-8)
      */
     public fun writeString(id: Int, text: String) {
+        writeString(id, text, Int.MAX_VALUE)
+    }
+
+    /**
+     * Write a string field whose UTF-8 encoding may be at most [maxlen] bytes.
+     *
+     * The same strict write as `writeString(id, text)`, with the caller's bound
+     * checked in the same measuring pass: a string whose UTF-8 encoding is longer
+     * than [maxlen] bytes is refused with [SofabError.ARGUMENT] **before** any byte
+     * is written, never cut. The codec holds no bound of its own; [maxlen] is the
+     * caller's (generated code passes a schema `maxlen`). It is the encode half of
+     * a bound the decoder already enforces, and it costs no second pass and no
+     * allocation: a UTF-16 unit never encodes to fewer than one UTF-8 byte, so a
+     * string with more than [maxlen] chars is refused without being scanned, and an
+     * all-ASCII string's byte length is its char count.
+     *
+     * @param id field id
+     * @param text string value
+     * @param maxlen the most UTF-8 bytes [text] may encode to; a negative value
+     *   refuses every string
+     * @throws SofabException [SofabError.ARGUMENT] if [text] encodes to more than
+     *   [maxlen] bytes or contains an unpaired surrogate (invalid UTF-8)
+     */
+    public fun writeString(id: Int, text: String, maxlen: Int) {
         val len = text.length
+        if (len > maxlen) throw overMaxlen(maxlen)
         val ascii = asciiPrefix(text)
         if (ascii == len) {
             writeIdTypeValue(id, T_FIXLEN, (len.toLong() shl 3) or F_STRING.toLong())
@@ -648,9 +673,14 @@ public class OStream(
             return
         }
         val n = utf8Length(text, ascii)
+        if (n > maxlen) throw overMaxlen(maxlen)
         writeIdTypeValue(id, T_FIXLEN, (n.toLong() shl 3) or F_STRING.toLong())
         writeUtf8(text, n)
     }
+
+    /** The refusal of a string over its caller-given `maxlen`; built off the hot path. */
+    private fun overMaxlen(maxlen: Int): SofabException =
+        SofabException(SofabError.ARGUMENT, "string longer than maxlen $maxlen bytes (UTF-8)")
 
     /**
      * Write a binary blob field.
